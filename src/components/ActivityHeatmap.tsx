@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   eachDayOfInterval,
-  endOfMonth,
   format,
   getDate,
   getDay,
@@ -85,7 +84,6 @@ export default function ActivityHeatmap() {
 
   const calendarDays = useMemo(() => {
     const monthStart = startOfMonth(cursorMonth);
-    const monthEnd = endOfMonth(cursorMonth);
     const startPad = getDay(monthStart); // 0 = Sun
     const gridStart = new Date(monthStart);
     gridStart.setDate(gridStart.getDate() - startPad);

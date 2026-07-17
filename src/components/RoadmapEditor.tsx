@@ -135,7 +135,14 @@ function getLayoutedElements(currentNodes: Node<NodeData>[], currentEdges: Edge[
 }
 
 function stripUiMeta(data: NodeData): NodeData {
-  const { hasChildren: _h, childCount: _c, onToggleCollapse: _o, ...rest } = data;
+  const rest: NodeData = {
+    title: data.title,
+    todos: data.todos,
+    progress: data.progress,
+  };
+  if (data.memo !== undefined) rest.memo = data.memo;
+  if (data.deadline !== undefined) rest.deadline = data.deadline;
+  if (data.collapsed !== undefined) rest.collapsed = data.collapsed;
   return rest;
 }
 

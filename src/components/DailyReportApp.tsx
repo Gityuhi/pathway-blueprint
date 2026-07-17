@@ -1,7 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Calendar, Save, Edit3, Lock } from 'lucide-react';
+import { Calendar, Save, Lock } from 'lucide-react';
 import clsx from 'clsx';
 import { loadDailyReports, saveDailyReports, getLocalDate } from '../store';
 import type { DailyReport } from '../types';
@@ -11,7 +11,6 @@ export default function DailyReportApp() {
   const [selectedDate, setSelectedDate] = useState<string>(getLocalDate());
   const [content, setContent] = useState<string>('');
   const [isSaved, setIsSaved] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
 
   const today = getLocalDate();
   const isToday = selectedDate === today;
@@ -27,9 +26,7 @@ export default function DailyReportApp() {
     const report = reports.find(r => r.date === selectedDate);
     setContent(report ? report.content : '');
     setIsSaved(true);
-    // Only allow editing if it's today
-    setIsEditing(isToday); 
-  }, [selectedDate, reports, isToday]);
+  }, [selectedDate, reports]);
 
   const handleSave = () => {
     const otherReports = reports.filter(r => r.date !== selectedDate);
@@ -90,7 +87,7 @@ export default function DailyReportApp() {
             <div>
                 <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-3">
                     {new Date(selectedDate).toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' })}
-                    {!isToday && <Lock size={16} className="text-gray-400" title="Read Only" />}
+                    {!isToday && <Lock size={16} className="text-gray-400" aria-label="Read Only" />}
                 </h1>
                 <p className="text-sm text-gray-400">Daily Report</p>
             </div>
