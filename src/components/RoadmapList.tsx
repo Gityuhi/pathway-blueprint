@@ -11,6 +11,7 @@ interface RoadmapListProps {
   onDelete: (id: string) => void;
   onExport: () => void;
   onImport: (file: File) => void;
+  className?: string;
 }
 
 export default function RoadmapList({
@@ -21,6 +22,7 @@ export default function RoadmapList({
   onDelete,
   onExport,
   onImport,
+  className,
 }: RoadmapListProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -37,7 +39,12 @@ export default function RoadmapList({
   };
 
   return (
-    <div className="w-64 bg-gray-50 border-r border-gray-200 flex flex-col h-full">
+    <div
+      className={clsx(
+        'w-64 bg-gray-50 border-r border-gray-200 flex flex-col h-full',
+        className
+      )}
+    >
       <div className="p-4 border-b border-gray-200 flex justify-between items-center bg-white">
         <h2 className="font-bold text-gray-800 flex items-center gap-2">
             <LayoutGrid size={18} className="text-gray-500" />
@@ -111,7 +118,7 @@ export default function RoadmapList({
                             onDelete(roadmap.id);
                         }
                     }}
-                    className="p-1.5 rounded-md text-gray-400 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
+                    className="p-1.5 rounded-md text-gray-400 hover:text-red-500 hover:bg-red-50 md:opacity-0 md:group-hover:opacity-100 transition-all flex-shrink-0"
                     title="削除"
                 >
                     <Trash2 size={16} />

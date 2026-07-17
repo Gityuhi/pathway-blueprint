@@ -522,7 +522,7 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
       >
         <Background gap={20} color="#e1e1e5" />
         <Controls />
-        <Panel position="top-left" className="m-4">
+        <Panel position="top-left" className="m-4 hidden md:block">
           <div className="text-xs text-gray-400 bg-white/80 p-2 rounded backdrop-blur-sm border border-gray-100 space-y-0.5">
             <p>Click: フォーカス / 再Click: ピンチイン</p>
             <p>Double Click: 編集</p>

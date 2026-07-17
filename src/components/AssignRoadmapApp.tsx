@@ -34,15 +34,15 @@ export default function AssignRoadmapApp({
   };
 
   return (
-    <div className="flex-1 h-full overflow-y-auto bg-gray-50">
-      <div className="max-w-xl mx-auto p-10">
+    <div className="flex-1 h-full overflow-y-auto bg-gray-50 min-h-0">
+      <div className="max-w-xl mx-auto p-4 md:p-10">
         <div className="flex items-center gap-3 mb-2">
           <div className="p-2.5 rounded-xl bg-blue-100 text-blue-600">
             <UserPlus size={22} />
           </div>
-          <h1 className="text-3xl font-bold text-gray-800">ロードマップアサイン</h1>
+          <h1 className="text-2xl md:text-3xl font-bold text-gray-800">ロードマップアサイン</h1>
         </div>
-        <p className="text-gray-500 mb-8 ml-[52px]">
+        <p className="text-sm md:text-base text-gray-500 mb-6 md:mb-8 md:ml-[52px]">
           Today&apos;s ToDo で使うロードマップを1つ選びます。選んだロードマップのノードを、その日の目標タブとして追加できます。
         </p>
 

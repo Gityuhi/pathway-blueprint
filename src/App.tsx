@@ -4,9 +4,10 @@ import type { AppTab } from './components/Sidebar';
 import RoadmapList from './components/RoadmapList';
 import RoadmapEditor from './components/RoadmapEditor';
 import DailyTodoApp from './components/DailyTodoApp';
-import DailyReportApp from './components/DailyReportApp';
 import ActivityHeatmap from './components/ActivityHeatmap';
 import AssignRoadmapApp from './components/AssignRoadmapApp';
+import MobileDrawer from './components/MobileDrawer';
+import MobileMenuButton from './components/MobileMenuButton';
 import {
   loadRoadmaps,
   saveRoadmaps,
@@ -34,6 +35,7 @@ function App() {
   const [assignedRoadmapId, setAssignedRoadmapId] = useState<string | null>(() =>
     loadAssignedRoadmapId()
   );
+  const [roadmapDrawerOpen, setRoadmapDrawerOpen] = useState(false);
 
   useEffect(() => {
     const loaded = loadRoadmaps();
@@ -169,23 +171,52 @@ function App() {
 
   const activeRoadmap = roadmaps.find((r) => r.id === activeRoadmapId);
 
+  const roadmapListProps = {
+    roadmaps,
+    activeId: activeRoadmapId,
+    onSelect: (id: string) => {
+      setActiveRoadmapId(id);
+      setRoadmapDrawerOpen(false);
+    },
+    onCreate: () => {
+      handleCreateRoadmap();
+      setRoadmapDrawerOpen(false);
+    },
+    onDelete: handleDeleteRoadmap,
+    onExport: handleExportRoadmaps,
+    onImport: handleImportRoadmaps,
+  };
+
   return (
-    <div className="flex w-screen h-screen overflow-hidden bg-gray-50 text-gray-800 font-sans">
+    <div className="flex w-screen h-[100dvh] overflow-hidden bg-gray-50 text-gray-800 font-sans">
       <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
 
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 pb-bottom-nav md:pb-0">
       {activeTab === 'roadmap' && (
-        <>
+        <div className="flex flex-1 min-h-0 flex-col md:flex-row">
+          <div className="md:hidden flex items-center gap-2 px-3 py-2.5 border-b border-gray-200 bg-white flex-shrink-0 safe-top">
+            <MobileMenuButton
+              onClick={() => setRoadmapDrawerOpen(true)}
+              label="ロードマップ一覧を開く"
+            />
+            <span className="font-semibold text-gray-800 truncate flex-1 min-w-0">
+              {activeRoadmap?.title || 'ロードマップ'}
+            </span>
+          </div>
+
+          <MobileDrawer open={roadmapDrawerOpen} onClose={() => setRoadmapDrawerOpen(false)}>
+            <RoadmapList
+              {...roadmapListProps}
+              className="w-full h-full border-r-0"
+            />
+          </MobileDrawer>
+
           <RoadmapList
-            roadmaps={roadmaps}
-            activeId={activeRoadmapId}
-            onSelect={setActiveRoadmapId}
-            onCreate={handleCreateRoadmap}
-            onDelete={handleDeleteRoadmap}
-            onExport={handleExportRoadmaps}
-            onImport={handleImportRoadmaps}
+            {...roadmapListProps}
+            className="hidden md:flex"
           />
 
-          <div className="flex-1 relative h-full">
+          <div className="flex-1 relative min-h-0">
             {activeRoadmap ? (
               <RoadmapEditor
                 key={activeRoadmap.id}
@@ -198,7 +229,7 @@ function App() {
               </div>
             )}
           </div>
-        </>
+        </div>
       )}
 
       {activeTab === 'daily' && (
@@ -209,8 +240,6 @@ function App() {
         />
       )}
 
-      {activeTab === 'report' && <DailyReportApp />}
-
       {activeTab === 'activity' && <ActivityHeatmap />}
 
       {activeTab === 'assign' && (
@@ -219,6 +248,7 @@ function App() {
           onAssignedChange={setAssignedRoadmapId}
         />
       )}
+      </div>
     </div>
   );
 }

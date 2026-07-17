@@ -107,10 +107,10 @@ export default function ActivityHeatmap() {
   const modalTasks = getCountableTasks(modalLog?.tasks ?? []);
 
   return (
-    <div className="w-full h-full overflow-y-auto bg-gray-100 flex items-center justify-center p-8">
-      <div className="w-full max-w-md bg-[#2a2d35] rounded-3xl shadow-2xl p-6 text-white">
+    <div className="w-full h-full min-h-0 overflow-y-auto bg-gray-100 flex items-start md:items-center justify-center p-3 md:p-8">
+      <div className="w-full max-w-md bg-[#2a2d35] rounded-2xl md:rounded-3xl shadow-2xl p-4 md:p-6 text-white">
         {/* Month nav */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center justify-between mb-4 md:mb-6">
           <button
             type="button"
             onClick={() => setCursorMonth((m) => subMonths(m, 1))}
@@ -118,7 +118,7 @@ export default function ActivityHeatmap() {
           >
             <ChevronLeft size={22} />
           </button>
-          <h2 className="text-lg font-semibold tracking-wide">
+          <h2 className="text-base md:text-lg font-semibold tracking-wide">
             {format(cursorMonth, 'MMMM yyyy', { locale: ja })}
           </h2>
           <button
@@ -131,22 +131,22 @@ export default function ActivityHeatmap() {
         </div>
 
         {/* Day + countdown */}
-        <div className="flex items-baseline justify-between mb-6 px-1">
-          <div className="text-3xl font-bold tracking-tight">
+        <div className="flex items-baseline justify-between mb-4 md:mb-6 px-1">
+          <div className="text-2xl md:text-3xl font-bold tracking-tight">
             Day {getDate(today)}
           </div>
-          <div className="text-sm text-gray-400 font-mono tabular-nums">{timeLeft}</div>
+          <div className="text-xs md:text-sm text-gray-400 font-mono tabular-nums">{timeLeft}</div>
         </div>
 
         {/* Weekday headers */}
-        <div className="grid grid-cols-7 gap-2 mb-3 text-center text-xs text-gray-500 font-medium">
+        <div className="grid grid-cols-7 gap-1 md:gap-2 mb-2 md:mb-3 text-center text-[10px] md:text-xs text-gray-500 font-medium">
           {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
             <div key={`${d}-${i}`}>{d}</div>
           ))}
         </div>
 
         {/* Days */}
-        <div className="grid grid-cols-7 gap-2">
+        <div className="grid grid-cols-7 gap-1 md:gap-2">
           {calendarDays.map((day) => {
             const mark = getMark(day);
             const dateStr = format(day, 'yyyy-MM-dd');
@@ -158,29 +158,32 @@ export default function ActivityHeatmap() {
                 key={dateStr}
                 type="button"
                 disabled={!inMonth}
+                onClick={() => {
+                  if (canOpen) setModalDate(dateStr);
+                }}
                 onDoubleClick={() => {
                   if (canOpen) setModalDate(dateStr);
                 }}
                 title={
                   canOpen
-                    ? `${dateStr}（ダブルクリックで詳細）`
+                    ? `${dateStr}（タップで詳細）`
                     : dateStr
                 }
                 className={clsx(
-                  'aspect-square rounded-full flex flex-col items-center justify-center relative transition-transform',
-                  inMonth && 'hover:scale-105',
+                  'aspect-square rounded-full flex flex-col items-center justify-center relative transition-transform min-w-0',
+                  inMonth && 'hover:scale-105 active:scale-95',
                   mark === 'other-month' && 'invisible pointer-events-none',
-                  mark === 'today' && 'bg-blue-500/25 border-[3px] border-blue-500 text-white',
+                  mark === 'today' && 'bg-blue-500/25 border-2 md:border-[3px] border-blue-500 text-white',
                   mark === 'future' && 'bg-[#3a3d47] text-gray-400',
                   mark === 'incomplete' &&
-                    'border-2 border-dashed border-red-500/80 text-gray-200',
+                    'border border-dashed md:border-2 border-red-500/80 text-gray-200',
                   mark === 'complete' &&
-                    'border-2 border-dashed border-emerald-500/80 text-gray-200'
+                    'border border-dashed md:border-2 border-emerald-500/80 text-gray-200'
                 )}
               >
                 <span
                   className={clsx(
-                    'text-sm font-semibold leading-none',
+                    'text-xs md:text-sm font-semibold leading-none',
                     mark === 'today' && 'text-white',
                     mark === 'future' && 'text-gray-400'
                   )}
@@ -188,18 +191,24 @@ export default function ActivityHeatmap() {
                   {getDate(day)}
                 </span>
                 {mark === 'incomplete' && (
-                  <X size={14} className="text-red-500 mt-0.5" strokeWidth={3} />
+                  <X size={12} className="text-red-500 mt-0.5 md:hidden" strokeWidth={3} />
+                )}
+                {mark === 'incomplete' && (
+                  <X size={14} className="text-red-500 mt-0.5 hidden md:block" strokeWidth={3} />
                 )}
                 {mark === 'complete' && (
-                  <Check size={14} className="text-emerald-400 mt-0.5" strokeWidth={3} />
+                  <Check size={12} className="text-emerald-400 mt-0.5 md:hidden" strokeWidth={3} />
+                )}
+                {mark === 'complete' && (
+                  <Check size={14} className="text-emerald-400 mt-0.5 hidden md:block" strokeWidth={3} />
                 )}
               </button>
             );
           })}
         </div>
 
-        <p className="mt-5 text-center text-xs text-gray-500">
-          過去の日付をダブルクリックすると、その日の Todo を確認できます
+        <p className="mt-4 md:mt-5 text-center text-[10px] md:text-xs text-gray-500">
+          過去の日付をタップすると、その日の Todo を確認できます
         </p>
       </div>
 

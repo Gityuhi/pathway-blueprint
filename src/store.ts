@@ -1,5 +1,5 @@
 import type { Node, Edge } from 'reactflow';
-import type { NodeData, DailyLog, DailyReport, RoutineTask, DailyTask } from './types';
+import type { NodeData, DailyLog, RoutineTask, DailyTask } from './types';
 
 export interface Roadmap {
   id: string;
@@ -11,7 +11,6 @@ export interface Roadmap {
 
 const STORAGE_KEY = 'pathway-roadmaps';
 const DAILY_STORAGE_KEY = 'pathway-daily-logs';
-const REPORT_STORAGE_KEY = 'pathway-daily-reports';
 const ROUTINE_STORAGE_KEY = 'pathway-routine-tasks';
 const ASSIGNED_ROADMAP_KEY = 'pathway-assigned-roadmap-id';
 
@@ -98,23 +97,6 @@ export const calcDailyAchievementRate = (tasks: DailyTask[]): number => {
   if (countable.length === 0) return 0;
   const done = countable.filter((t) => t.status === 'done').length;
   return Math.round((done / countable.length) * 100);
-};
-
-// --- Daily Reports ---
-
-export const loadDailyReports = (): DailyReport[] => {
-  const data = localStorage.getItem(REPORT_STORAGE_KEY);
-  if (!data) return [];
-  try {
-    return JSON.parse(data);
-  } catch (e) {
-    console.error('Failed to parse daily reports', e);
-    return [];
-  }
-};
-
-export const saveDailyReports = (reports: DailyReport[]) => {
-  localStorage.setItem(REPORT_STORAGE_KEY, JSON.stringify(reports));
 };
 
 // --- Routine Tasks ---

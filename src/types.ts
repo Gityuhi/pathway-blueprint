@@ -47,7 +47,3 @@ export interface DailyLog {
   activeGoalIds?: string[];
 }
 
-export interface DailyReport {
-  date: string; // YYYY-MM-DD
-  content: string;
-}
