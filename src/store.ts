@@ -84,6 +84,21 @@ export const saveDailyLogs = (logs: DailyLog[]) => {
   localStorage.setItem(DAILY_STORAGE_KEY, JSON.stringify(logs));
 };
 
+/** 指定日の振り返り（Markdown）を保存。DailyLog がなければ作成 */
+export const saveDailyLogReflection = (date: string, reflection: string) => {
+  const logs = loadDailyLogs();
+  const idx = logs.findIndex((l) => l.date === date);
+  if (idx >= 0) {
+    const next = [...logs];
+    next[idx] = { ...next[idx], reflection };
+    saveDailyLogs(next);
+    return next;
+  }
+  const next = [...logs, { date, tasks: [], reflection }];
+  saveDailyLogs(next);
+  return next;
+};
+
 /** 指定日より前で最も新しいログ（目標タブ引き継ぎ用） */
 export const findPreviousDailyLog = (date: string, logs: DailyLog[]): DailyLog | undefined => {
   return [...logs]

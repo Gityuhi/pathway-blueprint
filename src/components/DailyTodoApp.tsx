@@ -638,11 +638,14 @@ export default function DailyTodoApp({
 
   const persistLog = useCallback(
     (date: string, tasks: DailyTask[], goalIds: string[]) => {
-      const otherLogs = loadDailyLogs().filter((l) => l.date !== date);
+      const allLogs = loadDailyLogs();
+      const existing = allLogs.find((l) => l.date === date);
+      const otherLogs = allLogs.filter((l) => l.date !== date);
       const nextLog: DailyLog = {
         date,
         tasks,
         activeGoalIds: goalIds,
+        ...(existing?.reflection !== undefined ? { reflection: existing.reflection } : {}),
       };
       const updatedLogs = [...otherLogs, nextLog].sort((a, b) => b.date.localeCompare(a.date));
       saveDailyLogs(updatedLogs);

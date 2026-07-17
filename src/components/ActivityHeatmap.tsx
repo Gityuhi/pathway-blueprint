@@ -14,8 +14,10 @@ import {
 } from 'date-fns';
 import { ja } from 'date-fns/locale';
 import clsx from 'clsx';
-import { ChevronLeft, ChevronRight, X, Check } from 'lucide-react';
-import { getLocalDate, loadDailyLogs } from '../store';
+import { ChevronLeft, ChevronRight, X, Check, Save, Edit3 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { getLocalDate, loadDailyLogs, saveDailyLogReflection } from '../store';
 import type { DailyLog, DailyTask } from '../types';
 
 type DayMark = 'complete' | 'incomplete' | 'today' | 'future' | 'other-month';
@@ -62,6 +64,9 @@ export default function ActivityHeatmap() {
   });
   const [logs, setLogs] = useState<DailyLog[]>(() => loadDailyLogs());
   const [modalDate, setModalDate] = useState<string | null>(null);
+  const [reflectionDraft, setReflectionDraft] = useState('');
+  const [isEditingReflection, setIsEditingReflection] = useState(true);
+  const [reflectionSaved, setReflectionSaved] = useState(false);
 
   const today = useMemo(() => {
     const s = getLocalDate();
@@ -105,6 +110,30 @@ export default function ActivityHeatmap() {
 
   const modalLog = modalDate ? logMap.get(modalDate) : undefined;
   const modalTasks = getCountableTasks(modalLog?.tasks ?? []);
+
+  useEffect(() => {
+    if (!modalDate) return;
+    const saved = modalLog?.reflection ?? '';
+    setReflectionDraft(saved);
+    setIsEditingReflection(!saved.trim());
+    setReflectionSaved(false);
+  }, [modalDate, modalLog?.reflection]);
+
+  const handleSaveReflection = () => {
+    if (!modalDate) return;
+    const updated = saveDailyLogReflection(modalDate, reflectionDraft);
+    setLogs(updated);
+    setIsEditingReflection(false);
+    setReflectionSaved(true);
+    setTimeout(() => setReflectionSaved(false), 2000);
+  };
+
+  const closeModal = () => {
+    setModalDate(null);
+    setReflectionDraft('');
+    setIsEditingReflection(true);
+    setReflectionSaved(false);
+  };
 
   return (
     <div className="w-full h-full min-h-0 overflow-y-auto bg-gray-100 flex items-start md:items-center justify-center p-3 md:p-8">
@@ -208,23 +237,23 @@ export default function ActivityHeatmap() {
         </div>
 
         <p className="mt-4 md:mt-5 text-center text-[10px] md:text-xs text-gray-500">
-          過去の日付をタップすると、その日の Todo を確認できます
+          過去の日付をタップすると、その日の Todo と振り返りを確認できます
         </p>
       </div>
 
       {modalDate && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
-          onClick={() => setModalDate(null)}
+          onClick={closeModal}
           role="presentation"
         >
           <div
-            className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden text-gray-800"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-lg md:max-w-3xl max-h-[85vh] flex flex-col overflow-hidden text-gray-800"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
           >
-            <div className="p-5 border-b border-gray-100 flex items-center justify-between">
+            <div className="p-5 border-b border-gray-100 flex items-center justify-between flex-shrink-0">
               <div>
                 <h3 className="text-xl font-bold">
                   {format(new Date(modalDate + 'T00:00:00'), 'yyyy年M月d日(E)', {
@@ -237,59 +266,116 @@ export default function ActivityHeatmap() {
               </div>
               <button
                 type="button"
-                onClick={() => setModalDate(null)}
+                onClick={closeModal}
                 className="p-2 hover:bg-gray-100 rounded-full"
               >
                 <X size={18} className="text-gray-500" />
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-5">
-              {modalTasks.length === 0 ? (
-                <p className="text-center text-gray-400 py-12">この日の Todo はありません</p>
-              ) : (
-                <ul className="space-y-2">
-                  {modalTasks.map((task) => (
-                    <li
-                      key={task.id}
-                      className="flex items-start gap-3 px-3 py-2.5 rounded-xl bg-gray-50 border border-gray-100"
-                      style={{ paddingLeft: `${12 + task.indentLevel * 16}px` }}
-                    >
-                      <span
-                        className={clsx(
-                          'mt-0.5 flex-shrink-0 w-6 h-6 rounded-full border-2 flex items-center justify-center',
-                          task.status === 'todo' && 'border-gray-300 bg-white',
-                          task.status === 'doing' && 'border-blue-500 bg-blue-50',
-                          task.status === 'done' && 'border-green-500 bg-green-500 text-white'
-                        )}
+            <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-y-auto md:overflow-hidden">
+              <section className="p-5 border-b md:border-b-0 md:border-r border-gray-100 md:w-1/2 md:overflow-y-auto md:min-h-0">
+                <h4 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">
+                  Todo
+                </h4>
+                {modalTasks.length === 0 ? (
+                  <p className="text-center text-gray-400 py-6 text-sm">この日の Todo はありません</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {modalTasks.map((task) => (
+                      <li
+                        key={task.id}
+                        className="flex items-start gap-3 px-3 py-2.5 rounded-xl bg-gray-50 border border-gray-100"
+                        style={{ paddingLeft: `${12 + task.indentLevel * 16}px` }}
                       >
-                        {task.status === 'doing' && (
-                          <span className="w-2.5 h-2.5 rounded-full bg-blue-500" />
-                        )}
-                        {task.status === 'done' && <Check size={14} strokeWidth={3} />}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p
+                        <span
                           className={clsx(
-                            'text-base font-medium',
-                            task.status === 'done' && 'text-gray-400 line-through'
+                            'mt-0.5 flex-shrink-0 w-6 h-6 rounded-full border-2 flex items-center justify-center',
+                            task.status === 'todo' && 'border-gray-300 bg-white',
+                            task.status === 'doing' && 'border-blue-500 bg-blue-50',
+                            task.status === 'done' && 'border-green-500 bg-green-500 text-white'
                           )}
                         >
-                          {task.text}
-                        </p>
-                        <p className="text-xs text-gray-400 mt-0.5 uppercase tracking-wide">
-                          {task.status}
-                          {task.goalId == null
-                            ? ' · ルーティン'
-                            : task.goalId === 'other'
-                              ? ' · その他'
-                              : ' · 目標'}
-                        </p>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
+                          {task.status === 'doing' && (
+                            <span className="w-2.5 h-2.5 rounded-full bg-blue-500" />
+                          )}
+                          {task.status === 'done' && <Check size={14} strokeWidth={3} />}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p
+                            className={clsx(
+                              'text-base font-medium',
+                              task.status === 'done' && 'text-gray-400 line-through'
+                            )}
+                          >
+                            {task.text}
+                          </p>
+                          <p className="text-xs text-gray-400 mt-0.5 uppercase tracking-wide">
+                            {task.status}
+                            {task.goalId == null
+                              ? ' · ルーティン'
+                              : task.goalId === 'other'
+                                ? ' · その他'
+                                : ' · 目標'}
+                          </p>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+
+              <section className="p-5 md:w-1/2 md:overflow-y-auto md:min-h-0">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">
+                    振り返り
+                  </h4>
+                  {!isEditingReflection && (
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingReflection(true)}
+                      className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 font-medium"
+                    >
+                      <Edit3 size={16} />
+                      編集
+                    </button>
+                  )}
+                </div>
+
+                {isEditingReflection ? (
+                  <div className="space-y-3">
+                    <textarea
+                      value={reflectionDraft}
+                      onChange={(e) => setReflectionDraft(e.target.value)}
+                      placeholder="Markdown で振り返りを書く..."
+                      className="w-full min-h-[140px] md:min-h-[220px] p-3 rounded-xl border border-gray-200 bg-gray-50 text-gray-800 text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 font-mono"
+                    />
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={handleSaveReflection}
+                        className={clsx(
+                          'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+                          reflectionSaved
+                            ? 'bg-green-600 text-white'
+                            : 'bg-blue-600 text-white hover:bg-blue-700'
+                        )}
+                      >
+                        {reflectionSaved ? <Check size={16} /> : <Save size={16} />}
+                        {reflectionSaved ? '保存しました' : '保存'}
+                      </button>
+                    </div>
+                  </div>
+                ) : reflectionDraft.trim() ? (
+                  <article className="prose prose-sm max-w-none prose-headings:text-gray-800 prose-p:text-gray-700 prose-a:text-blue-600 prose-strong:text-gray-800 prose-code:text-gray-800 prose-pre:bg-gray-50 prose-pre:border prose-pre:border-gray-200">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{reflectionDraft}</ReactMarkdown>
+                  </article>
+                ) : (
+                  <p className="text-sm text-gray-400 text-center py-8">
+                    振り返りはまだありません。「編集」から Markdown で記録できます。
+                  </p>
+                )}
+              </section>
             </div>
           </div>
         </div>

@@ -45,5 +45,7 @@ export interface DailyLog {
   tasks: DailyTask[];
   /** その日の目標タブ（ロードマップノード ID）。ルーティン以外 */
   activeGoalIds?: string[];
+  /** カレンダーログの振り返り（Markdown） */
+  reflection?: string;
 }
 
