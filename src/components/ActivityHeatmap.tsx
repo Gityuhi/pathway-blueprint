@@ -62,7 +62,7 @@ export default function ActivityHeatmap() {
     const n = new Date();
     return new Date(n.getFullYear(), n.getMonth(), 1);
   });
-  const [logs, setLogs] = useState<DailyLog[]>(() => loadDailyLogs());
+  const [logs, setLogs] = useState<DailyLog[]>([]);
   const [modalDate, setModalDate] = useState<string | null>(null);
   const [reflectionDraft, setReflectionDraft] = useState('');
   const [isEditingReflection, setIsEditingReflection] = useState(true);
@@ -78,7 +78,18 @@ export default function ActivityHeatmap() {
 
   // Refresh logs when mounting / month changes (in case Daily Todo updated)
   useEffect(() => {
-    setLogs(loadDailyLogs());
+    let cancelled = false;
+    (async () => {
+      try {
+        const loaded = await loadDailyLogs();
+        if (!cancelled) setLogs(loaded);
+      } catch (e) {
+        console.error(e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [cursorMonth]);
 
   const logMap = useMemo(() => {
@@ -119,13 +130,18 @@ export default function ActivityHeatmap() {
     setReflectionSaved(false);
   }, [modalDate, modalLog?.reflection]);
 
-  const handleSaveReflection = () => {
+  const handleSaveReflection = async () => {
     if (!modalDate) return;
-    const updated = saveDailyLogReflection(modalDate, reflectionDraft);
-    setLogs(updated);
-    setIsEditingReflection(false);
-    setReflectionSaved(true);
-    setTimeout(() => setReflectionSaved(false), 2000);
+    try {
+      const updated = await saveDailyLogReflection(modalDate, reflectionDraft);
+      setLogs(updated);
+      setIsEditingReflection(false);
+      setReflectionSaved(true);
+      setTimeout(() => setReflectionSaved(false), 2000);
+    } catch (e) {
+      console.error(e);
+      alert('振り返りの保存に失敗しました。');
+    }
   };
 
   const closeModal = () => {
@@ -353,7 +369,7 @@ export default function ActivityHeatmap() {
                     <div className="flex justify-end">
                       <button
                         type="button"
-                        onClick={handleSaveReflection}
+                        onClick={() => void handleSaveReflection()}
                         className={clsx(
                           'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
                           reflectionSaved

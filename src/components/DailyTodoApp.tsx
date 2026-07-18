@@ -42,7 +42,6 @@ import {
   generateId,
   findPreviousDailyLog,
   calcDailyAchievementRate,
-  loadAssignedRoadmapId,
   type Roadmap,
 } from '../store';
 import type { DailyLog, DailyTask, DailyTaskStatus, RoutineTask } from '../types';
@@ -591,9 +590,9 @@ export default function DailyTodoApp({
   assignedRoadmapId,
 }: DailyTodoAppProps) {
   const [view, setView] = useState<'journal' | 'routine'>('journal');
-  const [logs, setLogs] = useState<DailyLog[]>(() => loadDailyLogs());
+  const [logs, setLogs] = useState<DailyLog[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>(getLocalDate());
-  const [routineTasks, setRoutineTasks] = useState<RoutineTask[]>(() => loadRoutineTasks());
+  const [routineTasks, setRoutineTasks] = useState<RoutineTask[]>([]);
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied'>('idle');
   const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
   const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
@@ -607,7 +606,7 @@ export default function DailyTodoApp({
   const isMobile = useIsMobile();
 
   const assignedRoadmap = useMemo(
-    () => roadmaps.find((r) => r.id === (assignedRoadmapId ?? loadAssignedRoadmapId() ?? '')) ?? null,
+    () => roadmaps.find((r) => r.id === (assignedRoadmapId ?? '')) ?? null,
     [roadmaps, assignedRoadmapId]
   );
 
@@ -636,9 +635,29 @@ export default function DailyTodoApp({
     })
   );
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [loadedLogs, routines] = await Promise.all([
+          loadDailyLogs(),
+          loadRoutineTasks(),
+        ]);
+        if (cancelled) return;
+        setLogs(loadedLogs);
+        setRoutineTasks(routines);
+      } catch (e) {
+        console.error(e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const persistLog = useCallback(
-    (date: string, tasks: DailyTask[], goalIds: string[]) => {
-      const allLogs = loadDailyLogs();
+    async (date: string, tasks: DailyTask[], goalIds: string[]) => {
+      const allLogs = await loadDailyLogs();
       const existing = allLogs.find((l) => l.date === date);
       const otherLogs = allLogs.filter((l) => l.date !== date);
       const nextLog: DailyLog = {
@@ -648,7 +667,7 @@ export default function DailyTodoApp({
         ...(existing?.reflection !== undefined ? { reflection: existing.reflection } : {}),
       };
       const updatedLogs = [...otherLogs, nextLog].sort((a, b) => b.date.localeCompare(a.date));
-      saveDailyLogs(updatedLogs);
+      await saveDailyLogs(updatedLogs);
       setLogs(updatedLogs);
       setAllTasks(tasks);
       setActiveGoalIds(goalIds);
@@ -658,75 +677,93 @@ export default function DailyTodoApp({
 
   // Load / create snapshot for selected date
   useEffect(() => {
-    const currentLogs = loadDailyLogs();
-    const log = currentLogs.find((l) => l.date === selectedDate);
+    let cancelled = false;
 
-    if (log) {
-      let goalIds = (log.activeGoalIds ?? []).filter(
-        (id) => id !== OTHER_TAB && id !== ROUTINE_TAB
-      );
-      let tasks = log.tasks;
+    (async () => {
+      try {
+        const currentLogs = await loadDailyLogs();
+        if (cancelled) return;
 
-      // 「その他」タブ用プレースホルダがなければ追加
-      if (!tasks.some((t) => isOtherTask(t))) {
-        tasks = [...tasks, emptyTask(OTHER_TAB)];
-        persistLog(selectedDate, tasks, goalIds);
-        setActiveTab(ROUTINE_TAB);
+        const log = currentLogs.find((l) => l.date === selectedDate);
+
+        if (log) {
+          const goalIds = (log.activeGoalIds ?? []).filter(
+            (id) => id !== OTHER_TAB && id !== ROUTINE_TAB
+          );
+          let tasks = log.tasks;
+
+          if (!tasks.some((t) => isOtherTask(t))) {
+            tasks = [...tasks, emptyTask(OTHER_TAB)];
+            await persistLog(selectedDate, tasks, goalIds);
+            if (cancelled) return;
+            setActiveTab(ROUTINE_TAB);
+            setSelectedTaskIds(new Set());
+            setLastSelectedIndex(null);
+            return;
+          }
+
+          setAllTasks(tasks);
+          setActiveGoalIds(goalIds);
+          setActiveTab(ROUTINE_TAB);
+        } else if (selectedDate === getLocalDate()) {
+          const routines = await loadRoutineTasks();
+          if (cancelled) return;
+          const prev = findPreviousDailyLog(selectedDate, currentLogs);
+          const carriedGoals = resolveInitialGoalIds(prev);
+
+          const routineList: DailyTask[] =
+            routines.length > 0
+              ? routines.map((r) => ({
+                  id: generateId(),
+                  text: r.text,
+                  status: 'todo' as DailyTaskStatus,
+                  indentLevel: 0,
+                  goalId: null,
+                }))
+              : [emptyTask(null)];
+
+          const goalPlaceholderTasks = carriedGoals.map((gid) => emptyTask(gid));
+          const initialTasks = [
+            ...routineList,
+            emptyTask(OTHER_TAB),
+            ...goalPlaceholderTasks,
+          ];
+
+          await persistLog(selectedDate, initialTasks, carriedGoals);
+          if (cancelled) return;
+          setActiveTab(ROUTINE_TAB);
+        } else {
+          setAllTasks([emptyTask(null), emptyTask(OTHER_TAB)]);
+          setActiveGoalIds([]);
+          setActiveTab(ROUTINE_TAB);
+        }
+
         setSelectedTaskIds(new Set());
         setLastSelectedIndex(null);
-        return;
+      } catch (e) {
+        console.error(e);
       }
+    })();
 
-      setAllTasks(tasks);
-      setActiveGoalIds(goalIds);
-      setActiveTab(ROUTINE_TAB);
-    } else if (selectedDate === getLocalDate()) {
-      const routines = loadRoutineTasks();
-      const prev = findPreviousDailyLog(selectedDate, currentLogs);
-      const carriedGoals = resolveInitialGoalIds(prev);
-
-      const routineList: DailyTask[] =
-        routines.length > 0
-          ? routines.map((r) => ({
-              id: generateId(),
-              text: r.text,
-              status: 'todo' as DailyTaskStatus,
-              indentLevel: 0,
-              goalId: null,
-            }))
-          : [emptyTask(null)];
-
-      const goalPlaceholderTasks = carriedGoals.map((gid) => emptyTask(gid));
-      const initialTasks = [
-        ...routineList,
-        emptyTask(OTHER_TAB),
-        ...goalPlaceholderTasks,
-      ];
-
-      persistLog(selectedDate, initialTasks, carriedGoals);
-      setActiveTab(ROUTINE_TAB);
-    } else {
-      setAllTasks([emptyTask(null), emptyTask(OTHER_TAB)]);
-      setActiveGoalIds([]);
-      setActiveTab(ROUTINE_TAB);
-    }
-
-    setSelectedTaskIds(new Set());
-    setLastSelectedIndex(null);
+    return () => {
+      cancelled = true;
+    };
   }, [selectedDate, persistLog]);
 
   useEffect(() => {
     const timer = setInterval(() => {
-      const todayStr = getLocalDate();
-      const currentLogs = loadDailyLogs();
-      if (!currentLogs.find((l) => l.date === todayStr)) {
-        setLogs(currentLogs);
-        const yesterday = new Date();
-        yesterday.setDate(yesterday.getDate() - 1);
-        if (selectedDate === getLocalDate(yesterday)) {
-          setSelectedDate(todayStr);
+      void (async () => {
+        const todayStr = getLocalDate();
+        const currentLogs = await loadDailyLogs();
+        if (!currentLogs.find((l) => l.date === todayStr)) {
+          setLogs(currentLogs);
+          const yesterday = new Date();
+          yesterday.setDate(yesterday.getDate() - 1);
+          if (selectedDate === getLocalDate(yesterday)) {
+            setSelectedDate(todayStr);
+          }
         }
-      }
+      })();
     }, 60000);
     return () => clearInterval(timer);
   }, [selectedDate]);
@@ -762,7 +799,7 @@ export default function DailyTodoApp({
         const others = allTasks.filter((t) => t.goalId !== activeTab);
         nextAll = [...others, ...newVisible];
       }
-      persistLog(selectedDate, nextAll, activeGoalIds);
+      void persistLog(selectedDate, nextAll, activeGoalIds);
     },
     [activeTab, allTasks, activeGoalIds, selectedDate, persistLog]
   );
@@ -920,7 +957,7 @@ export default function DailyTodoApp({
           : tasks.filter((t) => t.goalId === tabId);
     if (filtered.length > 0) return;
     const gid = tabId === ROUTINE_TAB ? null : tabId;
-    persistLog(selectedDate, [...tasks, emptyTask(gid)], goalIds);
+    void persistLog(selectedDate, [...tasks, emptyTask(gid)], goalIds);
   };
 
   const handleSelectTab = (tabId: string) => {
@@ -933,7 +970,7 @@ export default function DailyTodoApp({
   const handleRemoveGoalTab = (goalId: string) => {
     const nextGoals = activeGoalIds.filter((id) => id !== goalId);
     const nextTasks = allTasks.filter((t) => t.goalId !== goalId);
-    persistLog(
+    void persistLog(
       selectedDate,
       nextTasks.length > 0 ? nextTasks : [emptyTask(null), emptyTask(OTHER_TAB)],
       nextGoals
@@ -954,7 +991,7 @@ export default function DailyTodoApp({
     }
     const nextGoals = [...activeGoalIds, ...toAdd];
     const placeholders = toAdd.map((gid) => emptyTask(gid));
-    persistLog(selectedDate, [...allTasks, ...placeholders], nextGoals);
+    void persistLog(selectedDate, [...allTasks, ...placeholders], nextGoals);
     setActiveTab(toAdd[0]);
     setGoalPickerOpen(false);
   };
@@ -962,19 +999,19 @@ export default function DailyTodoApp({
   const addRoutine = () => {
     const newRoutines = [...routineTasks, { id: generateId(), text: '' }];
     setRoutineTasks(newRoutines);
-    saveRoutineTasks(newRoutines);
+    void saveRoutineTasks(newRoutines);
   };
 
   const updateRoutine = (id: string, text: string) => {
     const newRoutines = routineTasks.map((r) => (r.id === id ? { ...r, text } : r));
     setRoutineTasks(newRoutines);
-    saveRoutineTasks(newRoutines);
+    void saveRoutineTasks(newRoutines);
   };
 
   const deleteRoutine = (id: string) => {
     const newRoutines = routineTasks.filter((r) => r.id !== id);
     setRoutineTasks(newRoutines);
-    saveRoutineTasks(newRoutines);
+    void saveRoutineTasks(newRoutines);
   };
 
   const sortedLogs = [...logs].sort((a, b) => b.date.localeCompare(a.date));

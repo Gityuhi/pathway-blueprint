@@ -1,5 +1,6 @@
 import clsx from 'clsx';
-import { Map, CalendarCheck, BarChart3, UserPlus } from 'lucide-react';
+import { Map, CalendarCheck, BarChart3, UserPlus, LogOut } from 'lucide-react';
+import { useAuth } from '../auth/AuthContext';
 
 export type AppTab = 'roadmap' | 'daily' | 'activity' | 'assign';
 
@@ -77,6 +78,13 @@ function NavButton({
 }
 
 export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {
+  const { signOut, configured } = useAuth();
+
+  const handleSignOut = async () => {
+    if (!confirm('ログアウトしますか？')) return;
+    await signOut();
+  };
+
   return (
     <>
       {/* Desktop: left sidebar */}
@@ -85,7 +93,7 @@ export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {
           P
         </div>
 
-        <div className="flex flex-col gap-4 w-full px-2">
+        <div className="flex flex-col gap-4 w-full px-2 flex-1">
           {NAV_ITEMS.map((item) => (
             <NavButton
               key={item.id}
@@ -96,6 +104,20 @@ export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {
             />
           ))}
         </div>
+
+        {configured && (
+          <button
+            type="button"
+            onClick={() => void handleSignOut()}
+            className="p-3 rounded-xl text-gray-400 hover:bg-gray-800 hover:text-white transition-colors group relative"
+            title="ログアウト"
+          >
+            <LogOut size={22} />
+            <span className="absolute left-14 bg-gray-900 text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">
+              ログアウト
+            </span>
+          </button>
+        )}
       </aside>
 
       {/* Mobile: bottom navigation */}
@@ -110,6 +132,16 @@ export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {
               variant="mobile"
             />
           ))}
+          {configured && (
+            <button
+              type="button"
+              onClick={() => void handleSignOut()}
+              className="flex flex-col items-center justify-center gap-0.5 flex-1 min-w-0 py-1 text-gray-400"
+            >
+              <LogOut size={20} />
+              <span className="text-[10px] font-medium">退出</span>
+            </button>
+          )}
         </div>
       </nav>
     </>

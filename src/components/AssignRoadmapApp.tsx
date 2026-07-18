@@ -16,7 +16,14 @@ export default function AssignRoadmapApp({
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    setRoadmapId(loadAssignedRoadmapId() || '');
+    let cancelled = false;
+    (async () => {
+      const id = await loadAssignedRoadmapId();
+      if (!cancelled) setRoadmapId(id || '');
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -25,9 +32,9 @@ export default function AssignRoadmapApp({
     }
   }, [roadmaps, roadmapId]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const next = roadmapId || null;
-    saveAssignedRoadmapId(next);
+    await saveAssignedRoadmapId(next);
     onAssignedChange?.(next);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -74,7 +81,7 @@ export default function AssignRoadmapApp({
           <div className="pt-2 flex justify-end">
             <button
               type="button"
-              onClick={handleSave}
+              onClick={() => void handleSave()}
               className={clsx(
                 'flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors',
                 saved

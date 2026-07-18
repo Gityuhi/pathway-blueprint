@@ -32,22 +32,43 @@ function App() {
   const [activeRoadmapId, setActiveRoadmapId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<AppTab>('daily');
   const [upcomingDeadlineNodes, setUpcomingDeadlineNodes] = useState<UpcomingDeadlineNode[]>([]);
-  const [assignedRoadmapId, setAssignedRoadmapId] = useState<string | null>(() =>
-    loadAssignedRoadmapId()
-  );
+  const [assignedRoadmapId, setAssignedRoadmapId] = useState<string | null>(null);
   const [roadmapDrawerOpen, setRoadmapDrawerOpen] = useState(false);
+  const [booting, setBooting] = useState(true);
 
   useEffect(() => {
-    const loaded = loadRoadmaps();
-    setRoadmaps(loaded);
-    if (loaded.length > 0) {
-      setActiveRoadmapId(loaded[0].id);
-    } else {
-      const initial = createInitialRoadmap();
-      setRoadmaps([initial]);
-      setActiveRoadmapId(initial.id);
-      saveRoadmaps([initial]);
-    }
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const [loaded, assigned] = await Promise.all([
+          loadRoadmaps(),
+          loadAssignedRoadmapId(),
+        ]);
+        if (cancelled) return;
+
+        setAssignedRoadmapId(assigned);
+
+        if (loaded.length > 0) {
+          setRoadmaps(loaded);
+          setActiveRoadmapId(loaded[0].id);
+        } else {
+          const initial = createInitialRoadmap();
+          setRoadmaps([initial]);
+          setActiveRoadmapId(initial.id);
+          await saveRoadmaps([initial]);
+        }
+      } catch (e) {
+        console.error('Failed to boot app data', e);
+        alert('データの読み込みに失敗しました。再読み込みしてください。');
+      } finally {
+        if (!cancelled) setBooting(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -55,7 +76,6 @@ function App() {
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const nodesWithDeadlines: UpcomingDeadlineNode[] = [];
 
-    // アサインされたロードマップのノードだけを対象にする
     const assignedRoadmap = assignedRoadmapId
       ? roadmaps.find((r) => r.id === assignedRoadmapId)
       : null;
@@ -70,7 +90,6 @@ function App() {
           (deadlineDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
         );
 
-        // 期限切れは除外。残り60日以内のみ
         if (remainingDays < 0 || remainingDays > 60) return;
 
         nodesWithDeadlines.push({
@@ -82,29 +101,27 @@ function App() {
       });
     }
 
-    // 期限が短い順
     nodesWithDeadlines.sort((a, b) => a.remainingDays - b.remainingDays);
-
     setUpcomingDeadlineNodes(nodesWithDeadlines);
   }, [roadmaps, assignedRoadmapId]);
 
-  const handleCreateRoadmap = () => {
+  const handleCreateRoadmap = async () => {
     const newRoadmap = createInitialRoadmap();
     const updatedList = [newRoadmap, ...roadmaps];
     setRoadmaps(updatedList);
     setActiveRoadmapId(newRoadmap.id);
-    saveRoadmaps(updatedList);
+    await saveRoadmaps(updatedList);
   };
 
-  const handleSaveRoadmap = (updatedRoadmap: Roadmap) => {
+  const handleSaveRoadmap = async (updatedRoadmap: Roadmap) => {
     const updatedList = roadmaps.map((r) =>
       r.id === updatedRoadmap.id ? updatedRoadmap : r
     );
     setRoadmaps(updatedList);
-    saveRoadmaps(updatedList);
+    await saveRoadmaps(updatedList);
   };
 
-  const handleDeleteRoadmap = (id: string) => {
+  const handleDeleteRoadmap = async (id: string) => {
     const updatedList = roadmaps.filter((r) => r.id !== id);
 
     let nextActiveId = activeRoadmapId;
@@ -121,13 +138,13 @@ function App() {
     }
 
     if (assignedRoadmapId === id) {
-      saveAssignedRoadmapId(null);
+      await saveAssignedRoadmapId(null);
       setAssignedRoadmapId(null);
     }
 
     setRoadmaps(finalRoadmaps);
     setActiveRoadmapId(nextActiveId);
-    saveRoadmaps(finalRoadmaps);
+    await saveRoadmaps(finalRoadmaps);
   };
 
   const handleExportRoadmaps = () => {
@@ -136,7 +153,7 @@ function App() {
 
   const handleImportRoadmaps = (file: File) => {
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const text = typeof reader.result === 'string' ? reader.result : '';
       const imported = parseRoadmapImport(text);
 
@@ -153,14 +170,19 @@ function App() {
         return;
       }
 
-      setRoadmaps(imported);
-      setActiveRoadmapId(imported[0].id);
-      saveRoadmaps(imported);
+      try {
+        setRoadmaps(imported);
+        setActiveRoadmapId(imported[0].id);
+        await saveRoadmaps(imported);
 
-      const stillAssigned = imported.some((r) => r.id === assignedRoadmapId);
-      if (!stillAssigned) {
-        saveAssignedRoadmapId(null);
-        setAssignedRoadmapId(null);
+        const stillAssigned = imported.some((r) => r.id === assignedRoadmapId);
+        if (!stillAssigned) {
+          await saveAssignedRoadmapId(null);
+          setAssignedRoadmapId(null);
+        }
+      } catch (e) {
+        console.error(e);
+        alert('インポートの保存に失敗しました。');
       }
     };
     reader.onerror = () => {
@@ -179,13 +201,23 @@ function App() {
       setRoadmapDrawerOpen(false);
     },
     onCreate: () => {
-      handleCreateRoadmap();
+      void handleCreateRoadmap();
       setRoadmapDrawerOpen(false);
     },
-    onDelete: handleDeleteRoadmap,
+    onDelete: (id: string) => {
+      void handleDeleteRoadmap(id);
+    },
     onExport: handleExportRoadmaps,
     onImport: handleImportRoadmaps,
   };
+
+  if (booting) {
+    return (
+      <div className="flex w-screen h-[100dvh] items-center justify-center bg-gray-50 text-gray-500">
+        読み込み中…
+      </div>
+    );
+  }
 
   return (
     <div className="flex w-screen h-[100dvh] overflow-hidden bg-gray-50 text-gray-800 font-sans">
