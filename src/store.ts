@@ -266,20 +266,56 @@ export const saveDailyLogs = async (logs: DailyLog[]): Promise<void> => {
   }
 };
 
+/** 1日分だけ upsert（入力中の保存向け。全件同期しない） */
+export const upsertDailyLog = async (log: DailyLog): Promise<void> => {
+  if (!isSupabaseConfigured) {
+    const logs = localLoadDailyLogs();
+    const idx = logs.findIndex((l) => l.date === log.date);
+    if (idx >= 0) {
+      const next = [...logs];
+      next[idx] = log;
+      localSaveDailyLogs(next);
+    } else {
+      localSaveDailyLogs([...logs, log]);
+    }
+    return;
+  }
+
+  const userId = await requireUserId();
+  const { error } = await supabase.from('daily_logs').upsert(
+    {
+      user_id: userId,
+      date: log.date,
+      tasks: log.tasks,
+      active_goal_ids: log.activeGoalIds ?? null,
+      reflection: log.reflection ?? null,
+    },
+    { onConflict: 'user_id,date' }
+  );
+
+  if (error) {
+    console.error('Failed to upsert daily log', error);
+    throw error;
+  }
+};
+
 export const saveDailyLogReflection = async (
   date: string,
   reflection: string
 ): Promise<DailyLog[]> => {
   const logs = await loadDailyLogs();
   const idx = logs.findIndex((l) => l.date === date);
+  let nextLog: DailyLog;
   let next: DailyLog[];
   if (idx >= 0) {
+    nextLog = { ...logs[idx], reflection };
     next = [...logs];
-    next[idx] = { ...next[idx], reflection };
+    next[idx] = nextLog;
   } else {
-    next = [...logs, { date, tasks: [], reflection }];
+    nextLog = { date, tasks: [], reflection };
+    next = [...logs, nextLog];
   }
-  await saveDailyLogs(next);
+  await upsertDailyLog(nextLog);
   return next;
 };
 

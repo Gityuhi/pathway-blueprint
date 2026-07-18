@@ -35,7 +35,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import {
   loadDailyLogs,
-  saveDailyLogs,
+  upsertDailyLog,
   loadRoutineTasks,
   saveRoutineTasks,
   getLocalDate,
@@ -53,6 +53,8 @@ const OTHER_TAB = 'other' as const;
 const SWIPE_THRESHOLD = 56;
 const MAX_SWIPE_DX = 72;
 const LONG_PRESS_DELAY_MS = 320;
+/** テキスト入力のクラウド保存デバウンス */
+const TEXT_SAVE_DEBOUNCE_MS = 500;
 
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(false);
@@ -124,6 +126,7 @@ interface SortableTaskItemProps {
   changeIndent: (index: number, delta: -1 | 1) => void;
   handleKeyDown: (e: React.KeyboardEvent, index: number) => void;
   handlePaste: (e: React.ClipboardEvent, index: number) => void;
+  onTextBlur: () => void;
   inputRef: (el: HTMLInputElement | null) => void;
   isComposingRef: React.MutableRefObject<boolean>;
 }
@@ -291,6 +294,7 @@ function SortableTaskItem({
   changeIndent,
   handleKeyDown,
   handlePaste,
+  onTextBlur,
   inputRef,
   isComposingRef,
 }: SortableTaskItemProps) {
@@ -486,6 +490,7 @@ function SortableTaskItem({
           onChange={(e) => updateText(index, e.target.value)}
           onKeyDown={(e) => handleKeyDown(e, index)}
           onPaste={(e) => handlePaste(e, index)}
+          onBlur={() => onTextBlur()}
           onPointerDown={(e) => {
             // モバイル: 長押しドラッグを行全体で受けたいので伝播させる
             // PC: ハンドル以外からのドラッグ開始を防ぐ
@@ -604,6 +609,18 @@ export default function DailyTodoApp({
   const [pendingGoalIds, setPendingGoalIds] = useState<Set<string>>(new Set());
   const [journalDrawerOpen, setJournalDrawerOpen] = useState(false);
   const isMobile = useIsMobile();
+  const logsRef = useRef<DailyLog[]>([]);
+  const textSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingTextSaveRef = useRef<{
+    date: string;
+    tasks: DailyTask[];
+    goalIds: string[];
+  } | null>(null);
+  const routineSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    logsRef.current = logs;
+  }, [logs]);
 
   const assignedRoadmap = useMemo(
     () => roadmaps.find((r) => r.id === (assignedRoadmapId ?? '')) ?? null,
@@ -657,7 +674,7 @@ export default function DailyTodoApp({
 
   const persistLog = useCallback(
     async (date: string, tasks: DailyTask[], goalIds: string[]) => {
-      const allLogs = await loadDailyLogs();
+      const allLogs = logsRef.current;
       const existing = allLogs.find((l) => l.date === date);
       const otherLogs = allLogs.filter((l) => l.date !== date);
       const nextLog: DailyLog = {
@@ -667,22 +684,70 @@ export default function DailyTodoApp({
         ...(existing?.reflection !== undefined ? { reflection: existing.reflection } : {}),
       };
       const updatedLogs = [...otherLogs, nextLog].sort((a, b) => b.date.localeCompare(a.date));
-      await saveDailyLogs(updatedLogs);
+      logsRef.current = updatedLogs;
       setLogs(updatedLogs);
       setAllTasks(tasks);
       setActiveGoalIds(goalIds);
+      await upsertDailyLog(nextLog);
     },
     []
   );
+
+  const flushTextSave = useCallback(async () => {
+    if (textSaveTimerRef.current) {
+      clearTimeout(textSaveTimerRef.current);
+      textSaveTimerRef.current = null;
+    }
+    const pending = pendingTextSaveRef.current;
+    if (!pending) return;
+    pendingTextSaveRef.current = null;
+    try {
+      await persistLog(pending.date, pending.tasks, pending.goalIds);
+    } catch (e) {
+      console.error('Failed to flush text save', e);
+    }
+  }, [persistLog]);
+
+  const scheduleTextSave = useCallback(
+    (date: string, tasks: DailyTask[], goalIds: string[]) => {
+      pendingTextSaveRef.current = { date, tasks, goalIds };
+      if (textSaveTimerRef.current) clearTimeout(textSaveTimerRef.current);
+      textSaveTimerRef.current = setTimeout(() => {
+        void flushTextSave();
+      }, TEXT_SAVE_DEBOUNCE_MS);
+    },
+    [flushTextSave]
+  );
+
+  // 日付切替・アンマウント時に未保存テキストを確定
+  useEffect(() => {
+    return () => {
+      if (textSaveTimerRef.current) clearTimeout(textSaveTimerRef.current);
+      const pending = pendingTextSaveRef.current;
+      if (pending) {
+        pendingTextSaveRef.current = null;
+        void upsertDailyLog({
+          date: pending.date,
+          tasks: pending.tasks,
+          activeGoalIds: pending.goalIds,
+          reflection: logsRef.current.find((l) => l.date === pending.date)?.reflection,
+        });
+      }
+      if (routineSaveTimerRef.current) clearTimeout(routineSaveTimerRef.current);
+    };
+  }, [selectedDate]);
 
   // Load / create snapshot for selected date
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
+      await flushTextSave();
       try {
         const currentLogs = await loadDailyLogs();
         if (cancelled) return;
+        logsRef.current = currentLogs;
+        setLogs(currentLogs);
 
         const log = currentLogs.find((l) => l.date === selectedDate);
 
@@ -748,7 +813,7 @@ export default function DailyTodoApp({
     return () => {
       cancelled = true;
     };
-  }, [selectedDate, persistLog]);
+  }, [selectedDate, persistLog, flushTextSave]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -786,22 +851,34 @@ export default function DailyTodoApp({
     [allTasks]
   );
 
-  const updateVisibleAndSave = useCallback(
+  const mergeVisibleIntoAll = useCallback(
     (newVisible: DailyTask[]) => {
-      let nextAll: DailyTask[];
       if (activeTab === ROUTINE_TAB) {
         const others = allTasks.filter((t) => !isRoutineTask(t));
-        nextAll = [...newVisible, ...others];
-      } else if (activeTab === OTHER_TAB) {
+        return [...newVisible, ...others];
+      }
+      if (activeTab === OTHER_TAB) {
         const others = allTasks.filter((t) => !isOtherTask(t));
-        nextAll = [...others, ...newVisible];
-      } else {
-        const others = allTasks.filter((t) => t.goalId !== activeTab);
-        nextAll = [...others, ...newVisible];
+        return [...others, ...newVisible];
+      }
+      const others = allTasks.filter((t) => t.goalId !== activeTab);
+      return [...others, ...newVisible];
+    },
+    [activeTab, allTasks]
+  );
+
+  const updateVisibleAndSave = useCallback(
+    (newVisible: DailyTask[]) => {
+      const nextAll = mergeVisibleIntoAll(newVisible);
+      // 構造変更は即保存（デバウンス中のテキストもまとめて確定）
+      pendingTextSaveRef.current = null;
+      if (textSaveTimerRef.current) {
+        clearTimeout(textSaveTimerRef.current);
+        textSaveTimerRef.current = null;
       }
       void persistLog(selectedDate, nextAll, activeGoalIds);
     },
-    [activeTab, allTasks, activeGoalIds, selectedDate, persistLog]
+    [mergeVisibleIntoAll, activeGoalIds, selectedDate, persistLog]
   );
 
   const toggleSelection = (id: string, shiftKey: boolean, index: number) => {
@@ -916,7 +993,21 @@ export default function DailyTodoApp({
   const updateText = (index: number, text: string) => {
     const newVisible = [...visibleTasks];
     newVisible[index] = { ...newVisible[index], text };
-    updateVisibleAndSave(newVisible);
+    const nextAll = mergeVisibleIntoAll(newVisible);
+    // UI は即反映、クラウド保存はデバウンス
+    setAllTasks(nextAll);
+    const existing = logsRef.current.find((l) => l.date === selectedDate);
+    const nextLog: DailyLog = {
+      date: selectedDate,
+      tasks: nextAll,
+      activeGoalIds: activeGoalIds,
+      ...(existing?.reflection !== undefined ? { reflection: existing.reflection } : {}),
+    };
+    const otherLogs = logsRef.current.filter((l) => l.date !== selectedDate);
+    const updatedLogs = [...otherLogs, nextLog].sort((a, b) => b.date.localeCompare(a.date));
+    logsRef.current = updatedLogs;
+    setLogs(updatedLogs);
+    scheduleTextSave(selectedDate, nextAll, activeGoalIds);
   };
 
   const changeIndent = useCallback(
@@ -1005,10 +1096,17 @@ export default function DailyTodoApp({
   const updateRoutine = (id: string, text: string) => {
     const newRoutines = routineTasks.map((r) => (r.id === id ? { ...r, text } : r));
     setRoutineTasks(newRoutines);
-    void saveRoutineTasks(newRoutines);
+    if (routineSaveTimerRef.current) clearTimeout(routineSaveTimerRef.current);
+    routineSaveTimerRef.current = setTimeout(() => {
+      void saveRoutineTasks(newRoutines);
+    }, TEXT_SAVE_DEBOUNCE_MS);
   };
 
   const deleteRoutine = (id: string) => {
+    if (routineSaveTimerRef.current) {
+      clearTimeout(routineSaveTimerRef.current);
+      routineSaveTimerRef.current = null;
+    }
     const newRoutines = routineTasks.filter((r) => r.id !== id);
     setRoutineTasks(newRoutines);
     void saveRoutineTasks(newRoutines);
@@ -1354,6 +1452,9 @@ export default function DailyTodoApp({
                           changeIndent={changeIndent}
                           handleKeyDown={handleKeyDown}
                           handlePaste={handlePaste}
+                          onTextBlur={() => {
+                            void flushTextSave();
+                          }}
                           inputRef={(el) => {
                             inputRefs.current[index] = el;
                           }}
