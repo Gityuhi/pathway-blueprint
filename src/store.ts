@@ -15,6 +15,31 @@ const DAILY_STORAGE_KEY = 'pathway-daily-logs';
 const ROUTINE_STORAGE_KEY = 'pathway-routine-tasks';
 const ASSIGNED_ROADMAP_KEY = 'pathway-assigned-roadmap-id';
 
+/** セッション中のメモリキャッシュ（タブ切替の再取得を防ぐ） */
+let dailyLogsCache: DailyLog[] | null = null;
+let dailyLogsInflight: Promise<DailyLog[]> | null = null;
+let routineTasksCache: RoutineTask[] | null = null;
+let userSettingsCache: {
+  routineTasks: RoutineTask[];
+  assignedRoadmapId: string | null;
+} | null = null;
+
+const setDailyLogsCache = (logs: DailyLog[]) => {
+  dailyLogsCache = logs;
+};
+
+const patchDailyLogCache = (log: DailyLog) => {
+  const current = dailyLogsCache ?? [];
+  const idx = current.findIndex((l) => l.date === log.date);
+  if (idx >= 0) {
+    const next = [...current];
+    next[idx] = log;
+    dailyLogsCache = next;
+  } else {
+    dailyLogsCache = [...current, log].sort((a, b) => b.date.localeCompare(a.date));
+  }
+};
+
 // --- Helpers ---
 
 export const getLocalDate = (date: Date = new Date()): string => {
@@ -189,31 +214,49 @@ export const saveRoadmaps = async (roadmaps: Roadmap[]): Promise<void> => {
 // --- Daily Logs ---
 
 export const loadDailyLogs = async (): Promise<DailyLog[]> => {
-  if (!isSupabaseConfigured) return localLoadDailyLogs();
+  if (dailyLogsCache) return dailyLogsCache;
+  if (dailyLogsInflight) return dailyLogsInflight;
 
-  const userId = await requireUserId();
-  const { data, error } = await supabase
-    .from('daily_logs')
-    .select('date, tasks, active_goal_ids, reflection')
-    .eq('user_id', userId)
-    .order('date', { ascending: false });
+  dailyLogsInflight = (async () => {
+    if (!isSupabaseConfigured) {
+      const logs = localLoadDailyLogs();
+      setDailyLogsCache(logs);
+      return logs;
+    }
 
-  if (error) {
-    console.error('Failed to load daily logs', error);
-    throw error;
+    const userId = await requireUserId();
+    const { data, error } = await supabase
+      .from('daily_logs')
+      .select('date, tasks, active_goal_ids, reflection')
+      .eq('user_id', userId)
+      .order('date', { ascending: false });
+
+    if (error) {
+      console.error('Failed to load daily logs', error);
+      throw error;
+    }
+
+    const logs = (data ?? []).map((row) => ({
+      date: row.date as string,
+      tasks: (row.tasks as DailyTask[]) ?? [],
+      activeGoalIds: (row.active_goal_ids as string[] | null) ?? undefined,
+      reflection: (row.reflection as string | null) ?? undefined,
+    }));
+    setDailyLogsCache(logs);
+    return logs;
+  })();
+
+  try {
+    return await dailyLogsInflight;
+  } finally {
+    dailyLogsInflight = null;
   }
-
-  return (data ?? []).map((row) => ({
-    date: row.date as string,
-    tasks: (row.tasks as DailyTask[]) ?? [],
-    activeGoalIds: (row.active_goal_ids as string[] | null) ?? undefined,
-    reflection: (row.reflection as string | null) ?? undefined,
-  }));
 };
 
 export const saveDailyLogs = async (logs: DailyLog[]): Promise<void> => {
   if (!isSupabaseConfigured) {
     localSaveDailyLogs(logs);
+    setDailyLogsCache(logs);
     return;
   }
 
@@ -246,7 +289,10 @@ export const saveDailyLogs = async (logs: DailyLog[]): Promise<void> => {
     }
   }
 
-  if (logs.length === 0) return;
+  if (logs.length === 0) {
+    setDailyLogsCache([]);
+    return;
+  }
 
   const rows = logs.map((l) => ({
     user_id: userId,
@@ -264,19 +310,24 @@ export const saveDailyLogs = async (logs: DailyLog[]): Promise<void> => {
     console.error('Failed to save daily logs', upsertError);
     throw upsertError;
   }
+
+  setDailyLogsCache(logs);
 };
 
 /** 1日分だけ upsert（入力中の保存向け。全件同期しない） */
 export const upsertDailyLog = async (log: DailyLog): Promise<void> => {
   if (!isSupabaseConfigured) {
-    const logs = localLoadDailyLogs();
+    const logs = dailyLogsCache ?? localLoadDailyLogs();
     const idx = logs.findIndex((l) => l.date === log.date);
     if (idx >= 0) {
       const next = [...logs];
       next[idx] = log;
       localSaveDailyLogs(next);
+      setDailyLogsCache(next);
     } else {
-      localSaveDailyLogs([...logs, log]);
+      const next = [...logs, log];
+      localSaveDailyLogs(next);
+      setDailyLogsCache(next);
     }
     return;
   }
@@ -297,6 +348,8 @@ export const upsertDailyLog = async (log: DailyLog): Promise<void> => {
     console.error('Failed to upsert daily log', error);
     throw error;
   }
+
+  patchDailyLogCache(log);
 };
 
 export const saveDailyLogReflection = async (
@@ -338,6 +391,8 @@ async function loadUserSettings(): Promise<{
   routineTasks: RoutineTask[];
   assignedRoadmapId: string | null;
 }> {
+  if (userSettingsCache) return userSettingsCache;
+
   const userId = await requireUserId();
   const { data, error } = await supabase
     .from('user_settings')
@@ -350,10 +405,12 @@ async function loadUserSettings(): Promise<{
     throw error;
   }
 
-  return {
+  userSettingsCache = {
     routineTasks: (data?.routine_tasks as RoutineTask[]) ?? [],
     assignedRoadmapId: (data?.assigned_roadmap_id as string | null) ?? null,
   };
+  routineTasksCache = userSettingsCache.routineTasks;
+  return userSettingsCache;
 }
 
 async function upsertUserSettings(patch: {
@@ -380,10 +437,21 @@ async function upsertUserSettings(patch: {
     console.error('Failed to save user settings', error);
     throw error;
   }
+
+  userSettingsCache = {
+    routineTasks: row.routine_tasks as RoutineTask[],
+    assignedRoadmapId: row.assigned_roadmap_id,
+  };
+  routineTasksCache = userSettingsCache.routineTasks;
 }
 
 export const loadRoutineTasks = async (): Promise<RoutineTask[]> => {
-  if (!isSupabaseConfigured) return localLoadRoutineTasks();
+  if (!isSupabaseConfigured) {
+    if (routineTasksCache) return routineTasksCache;
+    routineTasksCache = localLoadRoutineTasks();
+    return routineTasksCache;
+  }
+  if (routineTasksCache) return routineTasksCache;
   const settings = await loadUserSettings();
   return settings.routineTasks;
 };
@@ -391,6 +459,7 @@ export const loadRoutineTasks = async (): Promise<RoutineTask[]> => {
 export const saveRoutineTasks = async (tasks: RoutineTask[]): Promise<void> => {
   if (!isSupabaseConfigured) {
     localSaveRoutineTasks(tasks);
+    routineTasksCache = tasks;
     return;
   }
   await upsertUserSettings({ routineTasks: tasks });

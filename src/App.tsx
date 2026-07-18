@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import clsx from 'clsx';
 import Sidebar from './components/Sidebar';
 import type { AppTab } from './components/Sidebar';
 import RoadmapList from './components/RoadmapList';
@@ -264,22 +265,40 @@ function App() {
         </div>
       )}
 
-      {activeTab === 'daily' && (
+      {/* タブ切替でアンマウントしない（再取得・タブ消失を防ぐ） */}
+      <div
+        className={clsx(
+          'flex-1 min-h-0 min-w-0',
+          activeTab === 'daily' ? 'flex' : 'hidden'
+        )}
+      >
         <DailyTodoApp
           upcomingDeadlineNodes={upcomingDeadlineNodes}
           roadmaps={roadmaps}
           assignedRoadmapId={assignedRoadmapId}
         />
-      )}
+      </div>
 
-      {activeTab === 'activity' && <ActivityHeatmap />}
+      <div
+        className={clsx(
+          'flex-1 min-h-0 min-w-0',
+          activeTab === 'activity' ? 'flex' : 'hidden'
+        )}
+      >
+        <ActivityHeatmap />
+      </div>
 
-      {activeTab === 'assign' && (
+      <div
+        className={clsx(
+          'flex-1 min-h-0 min-w-0',
+          activeTab === 'assign' ? 'flex' : 'hidden'
+        )}
+      >
         <AssignRoadmapApp
           roadmaps={roadmaps}
           onAssignedChange={setAssignedRoadmapId}
         />
-      )}
+      </div>
       </div>
     </div>
   );

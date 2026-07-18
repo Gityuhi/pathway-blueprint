@@ -127,7 +127,7 @@ interface SortableTaskItemProps {
   handleKeyDown: (e: React.KeyboardEvent, index: number) => void;
   handlePaste: (e: React.ClipboardEvent, index: number) => void;
   onTextBlur: () => void;
-  inputRef: (el: HTMLInputElement | null) => void;
+  inputRef: (el: HTMLInputElement | HTMLTextAreaElement | null) => void;
   isComposingRef: React.MutableRefObject<boolean>;
 }
 
@@ -408,6 +408,36 @@ function SortableTaskItem({
 
   const dragListeners = isMobile ? listeners : undefined;
   const handleListeners = !isMobile ? listeners : undefined;
+  const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const resizeTextArea = useCallback(() => {
+    const el = textAreaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, []);
+
+  useEffect(() => {
+    if (isMobile) resizeTextArea();
+  }, [isMobile, task.text, indentPx, task.indentLevel, resizeTextArea]);
+
+  const setTextRef = useCallback(
+    (el: HTMLInputElement | HTMLTextAreaElement | null) => {
+      if (el instanceof HTMLTextAreaElement) {
+        textAreaRef.current = el;
+      } else {
+        textAreaRef.current = null;
+      }
+      inputRef(el);
+      if (el instanceof HTMLTextAreaElement) {
+        requestAnimationFrame(() => {
+          el.style.height = 'auto';
+          el.style.height = `${el.scrollHeight}px`;
+        });
+      }
+    },
+    [inputRef]
+  );
 
   const style: React.CSSProperties = {
     transform: isDragging
@@ -484,33 +514,63 @@ function SortableTaskItem({
           {task.status === 'done' && <CheckCircle2 size={20} strokeWidth={3} className="md:hidden" />}
           {task.status === 'done' && <CheckCircle2 size={24} strokeWidth={3} className="hidden md:block" />}
         </button>
-        <input
-          ref={inputRef}
-          value={task.text}
-          onChange={(e) => updateText(index, e.target.value)}
-          onKeyDown={(e) => handleKeyDown(e, index)}
-          onPaste={(e) => handlePaste(e, index)}
-          onBlur={() => onTextBlur()}
-          onPointerDown={(e) => {
-            // モバイル: 長押しドラッグを行全体で受けたいので伝播させる
-            // PC: ハンドル以外からのドラッグ開始を防ぐ
-            if (!isMobile) e.stopPropagation();
-          }}
-          onCompositionStart={() => {
-            isComposingRef.current = true;
-          }}
-          onCompositionEnd={() => {
-            isComposingRef.current = false;
-          }}
-          placeholder="Write a task..."
-          className={clsx(
-            'flex-1 min-w-0 bg-transparent border-none outline-none py-1 font-medium placeholder-gray-300 transition-all leading-relaxed',
-            'text-xl md:text-3xl',
-            task.status === 'done' &&
-              'text-gray-300 line-through decoration-gray-300 decoration-2',
-            task.status !== 'done' && 'text-gray-800'
-          )}
-        />
+        {isMobile ? (
+          <textarea
+            ref={setTextRef}
+            value={task.text}
+            rows={1}
+            onChange={(e) => {
+              updateText(index, e.target.value);
+              requestAnimationFrame(resizeTextArea);
+            }}
+            onKeyDown={(e) => handleKeyDown(e, index)}
+            onPaste={(e) => handlePaste(e, index)}
+            onBlur={() => onTextBlur()}
+            onPointerDown={() => {
+              // モバイル: 長押しドラッグを行全体で受けたいので伝播させる
+            }}
+            onCompositionStart={() => {
+              isComposingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              isComposingRef.current = false;
+            }}
+            placeholder="Write a task..."
+            className={clsx(
+              'flex-1 min-w-0 bg-transparent border-none outline-none py-1 font-medium placeholder-gray-300 transition-all leading-relaxed',
+              'text-xl resize-none overflow-hidden break-words whitespace-pre-wrap',
+              task.status === 'done' &&
+                'text-gray-300 line-through decoration-gray-300 decoration-2',
+              task.status !== 'done' && 'text-gray-800'
+            )}
+          />
+        ) : (
+          <input
+            ref={setTextRef}
+            value={task.text}
+            onChange={(e) => updateText(index, e.target.value)}
+            onKeyDown={(e) => handleKeyDown(e, index)}
+            onPaste={(e) => handlePaste(e, index)}
+            onBlur={() => onTextBlur()}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+            }}
+            onCompositionStart={() => {
+              isComposingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              isComposingRef.current = false;
+            }}
+            placeholder="Write a task..."
+            className={clsx(
+              'flex-1 min-w-0 bg-transparent border-none outline-none py-1 font-medium placeholder-gray-300 transition-all leading-relaxed',
+              'text-3xl',
+              task.status === 'done' &&
+                'text-gray-300 line-through decoration-gray-300 decoration-2',
+              task.status !== 'done' && 'text-gray-800'
+            )}
+          />
+        )}
         <div className="mt-3 md:mt-4 opacity-0 group-hover:opacity-100 text-xs text-gray-300 font-mono transition-opacity hidden md:block">
           {task.status.toUpperCase()}
         </div>
@@ -744,7 +804,9 @@ export default function DailyTodoApp({
     (async () => {
       await flushTextSave();
       try {
-        const currentLogs = await loadDailyLogs();
+        // キャッシュがあれば即時。なければ1回だけネットワーク取得
+        const currentLogs =
+          logsRef.current.length > 0 ? logsRef.current : await loadDailyLogs();
         if (cancelled) return;
         logsRef.current = currentLogs;
         setLogs(currentLogs);
@@ -833,7 +895,7 @@ export default function DailyTodoApp({
     return () => clearInterval(timer);
   }, [selectedDate]);
 
-  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const inputRefs = useRef<(HTMLInputElement | HTMLTextAreaElement | null)[]>([]);
   const isComposingRef = useRef(false);
 
   const visibleTasks = useMemo(() => {
