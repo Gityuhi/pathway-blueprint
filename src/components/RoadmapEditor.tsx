@@ -30,9 +30,15 @@ const nodeTypes = {
   custom: CustomNode,
 };
 
-const X_OFFSET = 400;
-const MIN_Y_GAP = 160;
+const NODE_WIDTH = 280;
+const NODE_X_GAP = 120;
+const X_STEP = NODE_WIDTH + NODE_X_GAP;
+const NODE_Y_GAP = 48;
+/** ルート直下の子のみ、この個数ごとに左右へ折り返す */
+const ROOT_CHILD_WRAP = 7;
 const CLICK_DELAY_MS = 250;
+/** モバイル等で交差が取れないときの近接ドロップ判定半径 (px) */
+const DROP_PROXIMITY_PX = 140;
 
 function buildChildrenMap(nodes: Node[], edges: Edge[]) {
   const childrenMap = new Map<string, string[]>();
@@ -47,6 +53,18 @@ function getHiddenNodeIds(nodes: Node<NodeData>[], edges: Edge[]) {
   const childrenMap = buildChildrenMap(nodes, edges);
   const hidden = new Set<string>();
 
+  let rootId = 'root';
+  if (!nodes.find((n) => n.id === 'root')) {
+    const nodeIds = new Set(nodes.map((n) => n.id));
+    const targetIds = new Set(edges.map((e) => e.target));
+    for (const id of nodeIds) {
+      if (!targetIds.has(id)) {
+        rootId = id;
+        break;
+      }
+    }
+  }
+
   const hideDescendants = (nodeId: string) => {
     for (const childId of childrenMap.get(nodeId) || []) {
       hidden.add(childId);
@@ -55,9 +73,21 @@ function getHiddenNodeIds(nodes: Node<NodeData>[], edges: Edge[]) {
   };
 
   nodes.forEach((n) => {
-    if (n.data.collapsed) {
-      hideDescendants(n.id);
-    }
+    const children = childrenMap.get(n.id) || [];
+    children.forEach((childId, index) => {
+      let side: CollapseSide;
+      if (n.id === rootId) {
+        side = rootChildSide(index);
+      } else {
+        const child = nodes.find((c) => c.id === childId);
+        side =
+          child && child.position.x < n.position.x ? 'left' : 'right';
+      }
+      if (isSideCollapsed(n.data, side)) {
+        hidden.add(childId);
+        hideDescendants(childId);
+      }
+    });
   });
 
   return hidden;
@@ -67,10 +97,146 @@ function getDirectChildren(nodeId: string, edges: Edge[]) {
   return edges.filter((e) => e.source === nodeId).map((e) => e.target);
 }
 
+function findDescendantIds(nodeId: string, edges: Edge[]): Set<string> {
+  const ids = new Set<string>();
+  const walk = (id: string) => {
+    for (const childId of getDirectChildren(id, edges)) {
+      ids.add(childId);
+      walk(childId);
+    }
+  };
+  walk(nodeId);
+  return ids;
+}
+
+/** 実測値があれば優先。なければタイトル行数などから推定 */
+function estimateNodeHeight(node: Node<NodeData>): number {
+  if (typeof node.height === 'number' && node.height > 0) {
+    return node.height;
+  }
+  const title = node.data.title || '無題のノード';
+  const charCount = [...title].length;
+  // 幅280・padding込みでおおよそ13全角/行、最大2行
+  const lines = Math.min(2, Math.max(1, Math.ceil(charCount / 13)));
+  const titleH = lines * 22;
+  const deadlineH = node.data.deadline ? 16 : 0;
+  const progressH = 36;
+  const paddingY = 24;
+  const gap = 8;
+  return paddingY + titleH + deadlineH + gap + progressH;
+}
+
+function nodeCenter(node: Node) {
+  const w = node.width ?? NODE_WIDTH;
+  const h =
+    typeof node.height === 'number' && node.height > 0
+      ? node.height
+      : estimateNodeHeight(node as Node<NodeData>);
+  return {
+    x: node.position.x + w / 2,
+    y: node.position.y + h / 2,
+  };
+}
+
+/** ドラッグ中ノードと交差／近接する、リペアレント可能なドロップ先を返す */
+function pickDropTarget(
+  draggedNode: Node,
+  intersecting: Node[],
+  edges: Edge[],
+  allNodes: Node[] = []
+): Node | null {
+  const descendants = findDescendantIds(draggedNode.id, edges);
+  const isValid = (n: Node) =>
+    n.id !== draggedNode.id && !n.hidden && !descendants.has(n.id);
+
+  let candidates = intersecting.filter(isValid);
+
+  // タッチ操作では交差が取れないことがあるため、中心距離でも候補を拾う
+  if (candidates.length === 0 && allNodes.length > 0) {
+    const dragCenter = nodeCenter(draggedNode);
+    const prox2 = DROP_PROXIMITY_PX * DROP_PROXIMITY_PX;
+    candidates = allNodes.filter((n) => {
+      if (!isValid(n)) return false;
+      const c = nodeCenter(n);
+      const d2 = (c.x - dragCenter.x) ** 2 + (c.y - dragCenter.y) ** 2;
+      return d2 <= prox2;
+    });
+  }
+
+  if (candidates.length === 0) return null;
+
+  const dragCenter = nodeCenter(draggedNode);
+  let best: Node | null = null;
+  let bestDist = Infinity;
+  for (const candidate of candidates) {
+    const c = nodeCenter(candidate);
+    const dist =
+      (c.x - dragCenter.x) ** 2 + (c.y - dragCenter.y) ** 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+function makeParentEdge(parentId: string, childId: string): Edge {
+  return {
+    id: `e-${parentId}-${childId}`,
+    source: parentId,
+    target: childId,
+    animated: true,
+    style: { stroke: '#b1b1b7', strokeWidth: 2 },
+  };
+}
+
+type CollapseSide = 'left' | 'right';
+
+function isSideCollapsed(data: NodeData | undefined, side: CollapseSide): boolean {
+  if (!data) return false;
+  // 旧データ互換: collapsed は両側閉じ
+  if (data.collapsed) return true;
+  return side === 'left' ? !!data.collapsedLeft : !!data.collapsedRight;
+}
+
+/** ルート直下の子 index → 左右（7個折り返しと同じ規則） */
+function rootChildSide(index: number): CollapseSide {
+  const chunkIndex = Math.floor(index / ROOT_CHILD_WRAP);
+  return chunkIndex % 2 === 0 ? 'right' : 'left';
+}
+
+function toggleSideCollapse(data: NodeData, side: CollapseSide): NodeData {
+  const left = isSideCollapsed(data, 'left');
+  const right = isSideCollapsed(data, 'right');
+  const nextLeft = side === 'left' ? !left : left;
+  const nextRight = side === 'right' ? !right : right;
+  const next: NodeData = { ...data };
+  delete next.collapsed;
+  if (nextLeft) next.collapsedLeft = true;
+  else delete next.collapsedLeft;
+  if (nextRight) next.collapsedRight = true;
+  else delete next.collapsedRight;
+  return next;
+}
+
+function expandSide(data: NodeData, side: CollapseSide): NodeData {
+  if (!isSideCollapsed(data, side)) return data;
+  return toggleSideCollapse(data, side);
+}
+
+/**
+ * ツリーを自動配置する。
+ * React Flow の position は左上基準なので、ノード中心が揃うよう y を補正する。
+ * ルート直下の子のみ ROOT_CHILD_WRAP 個ごとに左右へ折り返す。
+ */
 function getLayoutedElements(currentNodes: Node<NodeData>[], currentEdges: Edge[]) {
   if (currentNodes.length === 0) return currentNodes;
 
   const childrenMap = buildChildrenMap(currentNodes, currentEdges);
+  const heightOf = (nodeId: string) => {
+    const node = currentNodes.find((n) => n.id === nodeId);
+    return node ? estimateNodeHeight(node) : 88;
+  };
 
   let rootId = 'root';
   if (!currentNodes.find((n) => n.id === 'root')) {
@@ -86,45 +252,125 @@ function getLayoutedElements(currentNodes: Node<NodeData>[], currentEdges: Edge[
 
   const subtreeHeights = new Map<string, number>();
 
-  const calculateHeight = (nodeId: string): number => {
-    const node = currentNodes.find((n) => n.id === nodeId);
-    const children = node?.data.collapsed ? [] : childrenMap.get(nodeId) || [];
+  const columnHeight = (childIds: string[]) => {
+    let total = 0;
+    childIds.forEach((childId, index) => {
+      total += subtreeHeights.get(childId) || heightOf(childId);
+      if (index < childIds.length - 1) total += NODE_Y_GAP;
+    });
+    return total;
+  };
 
-    if (children.length === 0) {
-      const height = MIN_Y_GAP;
-      subtreeHeights.set(nodeId, height);
-      return height;
+  const calculateHeight = (nodeId: string, dir: 1 | -1 = 1): number => {
+    const node = currentNodes.find((n) => n.id === nodeId);
+    const allChildren = childrenMap.get(nodeId) || [];
+    const selfH = heightOf(nodeId);
+    const data = node?.data;
+
+    if (nodeId === rootId) {
+      // 可視側の子だけ高さ計算
+      allChildren.forEach((childId, index) => {
+        const side = rootChildSide(index);
+        if (!isSideCollapsed(data, side)) {
+          calculateHeight(childId, side === 'left' ? -1 : 1);
+        }
+      });
+
+      if (allChildren.length === 0) {
+        subtreeHeights.set(nodeId, selfH);
+        return selfH;
+      }
+
+      let maxCol = 0;
+      for (let i = 0; i < allChildren.length; i += ROOT_CHILD_WRAP) {
+        const side = rootChildSide(i);
+        if (isSideCollapsed(data, side)) continue;
+        const chunk = allChildren.slice(i, i + ROOT_CHILD_WRAP);
+        maxCol = Math.max(maxCol, columnHeight(chunk));
+      }
+      const total = Math.max(selfH, maxCol);
+      subtreeHeights.set(nodeId, total);
+      return total;
     }
 
-    let totalHeight = 0;
-    children.forEach((childId) => {
-      totalHeight += calculateHeight(childId);
-    });
-    subtreeHeights.set(nodeId, totalHeight);
-    return totalHeight;
+    const side: CollapseSide = dir === -1 ? 'left' : 'right';
+    if (isSideCollapsed(data, side) || allChildren.length === 0) {
+      subtreeHeights.set(nodeId, selfH);
+      return selfH;
+    }
+
+    allChildren.forEach((childId) => calculateHeight(childId, dir));
+    const total = Math.max(selfH, columnHeight(allChildren));
+    subtreeHeights.set(nodeId, total);
+    return total;
   };
 
-  calculateHeight(rootId);
+  calculateHeight(rootId, 1);
 
   const newPositions = new Map<string, { x: number; y: number }>();
-  const setPosition = (nodeId: string, x: number, yTop: number) => {
+
+  /**
+   * @param dir 子孫を伸ばす方向（1=右, -1=左）
+   */
+  const setPosition = (
+    nodeId: string,
+    x: number,
+    centerY: number,
+    dir: 1 | -1 = 1
+  ) => {
     const node = currentNodes.find((n) => n.id === nodeId);
-    const children = node?.data.collapsed ? [] : childrenMap.get(nodeId) || [];
-    const myHeight = subtreeHeights.get(nodeId) || MIN_Y_GAP;
-    const myY = yTop + myHeight / 2;
+    const allChildren = childrenMap.get(nodeId) || [];
+    const selfH = heightOf(nodeId);
+    const data = node?.data;
 
-    newPositions.set(nodeId, { x, y: myY });
+    newPositions.set(nodeId, { x, y: centerY - selfH / 2 });
 
-    let currentY = yTop;
-    children.forEach((childId) => {
-      const childHeight = subtreeHeights.get(childId) || MIN_Y_GAP;
-      setPosition(childId, x + X_OFFSET, currentY);
-      currentY += childHeight;
+    if (nodeId === rootId) {
+      for (let i = 0; i < allChildren.length; i += ROOT_CHILD_WRAP) {
+        const chunkIndex = i / ROOT_CHILD_WRAP;
+        const side = rootChildSide(i);
+        if (isSideCollapsed(data, side)) continue;
+
+        const chunk = allChildren.slice(i, i + ROOT_CHILD_WRAP);
+        const sideDir: 1 | -1 = chunkIndex % 2 === 0 ? 1 : -1;
+        const depth = Math.floor(chunkIndex / 2) + 1;
+        const childX = x + sideDir * depth * X_STEP;
+
+        const colH = columnHeight(chunk);
+        let cursor = centerY - colH / 2;
+        chunk.forEach((childId) => {
+          const childSubtreeH =
+            subtreeHeights.get(childId) || heightOf(childId);
+          setPosition(
+            childId,
+            childX,
+            cursor + childSubtreeH / 2,
+            sideDir
+          );
+          cursor += childSubtreeH + NODE_Y_GAP;
+        });
+      }
+      return;
+    }
+
+    const side: CollapseSide = dir === -1 ? 'left' : 'right';
+    if (isSideCollapsed(data, side) || allChildren.length === 0) return;
+
+    const colH = columnHeight(allChildren);
+    let cursor = centerY - colH / 2;
+    allChildren.forEach((childId) => {
+      const childSubtreeH = subtreeHeights.get(childId) || heightOf(childId);
+      setPosition(
+        childId,
+        x + dir * X_STEP,
+        cursor + childSubtreeH / 2,
+        dir
+      );
+      cursor += childSubtreeH + NODE_Y_GAP;
     });
   };
 
-  const rootHeight = subtreeHeights.get(rootId) || MIN_Y_GAP;
-  setPosition(rootId, 0, -rootHeight / 2);
+  setPosition(rootId, 0, 0, 1);
 
   return currentNodes.map((node) => {
     if (newPositions.has(node.id)) {
@@ -142,7 +388,11 @@ function stripUiMeta(data: NodeData): NodeData {
   };
   if (data.memo !== undefined) rest.memo = data.memo;
   if (data.deadline !== undefined) rest.deadline = data.deadline;
-  if (data.collapsed !== undefined) rest.collapsed = data.collapsed;
+  // 旧 collapsed は左右両方へ移行して保存
+  const left = isSideCollapsed(data, 'left');
+  const right = isSideCollapsed(data, 'right');
+  if (left) rest.collapsedLeft = true;
+  if (right) rest.collapsedRight = true;
   return rest;
 }
 
@@ -154,18 +404,42 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
 
   const clickTimeoutRef = useRef<number | null>(null);
-  const { fitView } = useReactFlow();
+  const measuredLayoutDoneRef = useRef(false);
+  const { fitView, getIntersectingNodes, getNodes } = useReactFlow();
 
   // Load data
   useEffect(() => {
-    setNodes(roadmap.nodes);
+    measuredLayoutDoneRef.current = false;
+    const layouted = getLayoutedElements(
+      roadmap.nodes as Node<NodeData>[],
+      roadmap.edges
+    );
+    setNodes(layouted);
     setEdges(roadmap.edges);
     setFocusedNodeId(null);
+    setDraggingNodeId(null);
+    setDropTargetId(null);
     setTimeout(() => fitView({ duration: 800 }), 100);
     isLoaded.current = true;
   }, [roadmap.id]);
+
+  // 実測サイズが揃ったら再レイアウト（行数差によるズレを解消）
+  useEffect(() => {
+    if (!isLoaded.current || measuredLayoutDoneRef.current) return;
+    if (nodes.length === 0) return;
+    const allMeasured = nodes.every(
+      (n) => typeof n.height === 'number' && n.height > 0
+    );
+    if (!allMeasured) return;
+
+    measuredLayoutDoneRef.current = true;
+    setNodes((nds) => getLayoutedElements(nds as Node<NodeData>[], edges));
+    setTimeout(() => fitView({ duration: 400 }), 50);
+  }, [nodes, edges, setNodes, fitView]);
 
   // Auto-save (strip UI-only fields)
   useEffect(() => {
@@ -201,11 +475,11 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
   );
 
   const handleToggleCollapse = useCallback(
-    (nodeId: string) => {
+    (nodeId: string, side: 'left' | 'right') => {
       setNodes((nds) => {
         const updated = nds.map((n) =>
           n.id === nodeId
-            ? { ...n, data: { ...n.data, collapsed: !n.data.collapsed } }
+            ? { ...n, data: toggleSideCollapse(n.data, side) }
             : n
         );
         return getLayoutedElements(updated, edges);
@@ -272,7 +546,37 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
     setFocusedNodeId(null);
   }, []);
 
-  // ドラッグ終了時: 同親の兄弟を Y 座標順に並べ替え、ツリーを自動整頓する
+  // ドラッグ開始: ハイライト
+  const handleNodeDragStart = useCallback(
+    (_event: React.MouseEvent, draggedNode: Node) => {
+      clearClickTimeout();
+      setDraggingNodeId(draggedNode.id);
+      setFocusedNodeId(draggedNode.id);
+      setDropTargetId(null);
+    },
+    []
+  );
+
+  // ドラッグ中: 交差／近接ノードをドロップ候補としてハイライト
+  const handleNodeDrag = useCallback(
+    (_event: React.MouseEvent, draggedNode: Node) => {
+      if (draggedNode.id === 'root') {
+        setDropTargetId(null);
+        return;
+      }
+      const intersecting = getIntersectingNodes(draggedNode);
+      const target = pickDropTarget(
+        draggedNode,
+        intersecting,
+        edges,
+        getNodes()
+      );
+      setDropTargetId(target?.id ?? null);
+    },
+    [edges, getIntersectingNodes, getNodes]
+  );
+
+  // ドラッグ終了: 他ノードへドロップなら親変更、否则は同親の兄弟並べ替え
   const handleNodeDragStop = useCallback(
     (_event: React.MouseEvent, draggedNode: Node) => {
       const nodesWithDrag = nodes.map((n) =>
@@ -281,13 +585,50 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
           : n
       );
 
-      const parentEdge = edges.find((e) => e.target === draggedNode.id);
-      let nextEdges = edges;
+      let resolvedDropId: string | null = null;
+      if (draggedNode.id !== 'root') {
+        const intersecting = getIntersectingNodes(draggedNode);
+        resolvedDropId =
+          pickDropTarget(draggedNode, intersecting, edges, getNodes())?.id ??
+          null;
+      }
+      setDropTargetId(null);
+      setDraggingNodeId(null);
 
-      if (parentEdge) {
-        const parentId = parentEdge.source;
-        const siblingEdges = edges.filter((e) => e.source === parentId);
-        const otherEdges = edges.filter((e) => e.source !== parentId);
+      const currentParentId = edges.find((e) => e.target === draggedNode.id)
+        ?.source;
+
+      // 別ノードへドロップ → サブツリーごとリペアレント
+      if (resolvedDropId && resolvedDropId !== currentParentId) {
+        const withoutOldParent = edges.filter(
+          (e) => e.target !== draggedNode.id
+        );
+        const nextEdges = [
+          ...withoutOldParent,
+          makeParentEdge(resolvedDropId, draggedNode.id),
+        ];
+
+        const nextNodes = nodesWithDrag.map((n) => {
+          if (n.id !== resolvedDropId) return n;
+          // ドロップ先の両側を開いて見えるようにする
+          return {
+            ...n,
+            data: expandSide(expandSide(n.data, 'left'), 'right'),
+          };
+        });
+
+        const layoutedNodes = getLayoutedElements(nextNodes, nextEdges);
+        setNodes(layoutedNodes);
+        setEdges(nextEdges);
+        setFocusedNodeId(draggedNode.id);
+        return;
+      }
+
+      // 同じ親内（またはドロップなし）→ 兄弟を Y 順に並べ替え
+      let nextEdges = edges;
+      if (currentParentId) {
+        const siblingEdges = edges.filter((e) => e.source === currentParentId);
+        const otherEdges = edges.filter((e) => e.source !== currentParentId);
 
         const sortedSiblingEdges = [...siblingEdges].sort((a, b) => {
           const yA =
@@ -307,32 +648,35 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
       }
       setFocusedNodeId(draggedNode.id);
     },
-    [nodes, edges, setNodes, setEdges]
+    [nodes, edges, setNodes, setEdges, getIntersectingNodes, getNodes]
   );
 
   const handleUpdateNode = useCallback(
     (id: string, newData: NodeData) => {
-      setNodes((nds) =>
-        nds.map((node) => {
+      setNodes((nds) => {
+        const updated = nds.map((node) => {
           if (node.id === id) {
             const cleaned = stripUiMeta(newData);
             const nextData: NodeData = {
               ...node.data,
               ...cleaned,
-              collapsed: node.data.collapsed,
+              collapsedLeft: node.data.collapsedLeft,
+              collapsedRight: node.data.collapsedRight,
               // undefined のときも明示的に消し、旧メモが残らないようにする
               memo: cleaned.memo,
             };
             if (!nextData.memo) {
               delete nextData.memo;
             }
+            delete nextData.collapsed;
             return { ...node, data: nextData };
           }
           return node;
-        })
-      );
+        });
+        return getLayoutedElements(updated, edges);
+      });
     },
-    [setNodes]
+    [setNodes, edges]
   );
 
   const addChildNode = useCallback(() => {
@@ -359,15 +703,40 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
       style: { stroke: '#b1b1b7', strokeWidth: 2 },
     };
 
-    // Expanding parent if it was collapsed so the new child is visible
+    // Expanding parent on the side where the new child will appear
+    const existingChildCount = edges.filter((e) => e.source === parentId).length;
+    let rootId = 'root';
+    if (!nodes.find((n) => n.id === 'root')) {
+      const nodeIds = new Set(nodes.map((n) => n.id));
+      const targetIds = new Set(edges.map((e) => e.target));
+      for (const id of nodeIds) {
+        if (!targetIds.has(id)) {
+          rootId = id;
+          break;
+        }
+      }
+    }
+    const parentNode = nodes.find((n) => n.id === parentId);
+    const parentOfParent = edges.find((e) => e.target === parentId)?.source;
+    const parentGrowsLeft =
+      parentOfParent &&
+      parentNode &&
+      parentNode.position.x <
+        (nodes.find((n) => n.id === parentOfParent)?.position.x ?? 0);
+
+    const expandOnSide: CollapseSide =
+      parentId === rootId
+        ? rootChildSide(existingChildCount)
+        : parentGrowsLeft
+          ? 'left'
+          : 'right';
+
     const nextNodes = [
       ...nodes.map((n) => ({
         ...n,
         selected: false,
         data:
-          n.id === parentId && n.data.collapsed
-            ? { ...n.data, collapsed: false }
-            : n.data,
+          n.id === parentId ? expandSide(n.data, expandOnSide) : n.data,
       })),
       newNode,
     ];
@@ -477,28 +846,81 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
     () =>
       nodes.map((n) => {
         const childIds = childrenMap.get(n.id) || [];
+        const isDragging = n.id === draggingNodeId;
+        const parentEdge = edges.find((e) => e.target === n.id);
+        const parent = parentEdge
+          ? nodes.find((p) => p.id === parentEdge.source)
+          : undefined;
+        const growsLeft = parent
+          ? n.position.x < parent.position.x
+          : false;
+
+        // ルートは折り返し規則、それ以外は成長方向で左右を判定
+        let leftChildIds: string[] = [];
+        let rightChildIds: string[] = [];
+        if (!parent) {
+          childIds.forEach((id, index) => {
+            if (rootChildSide(index) === 'left') leftChildIds.push(id);
+            else rightChildIds.push(id);
+          });
+        } else if (growsLeft) {
+          leftChildIds = childIds;
+        } else {
+          rightChildIds = childIds;
+        }
+
         return {
           ...n,
           hidden: hiddenNodeIds.has(n.id),
           selected: n.id === focusedNodeId || !!n.selected,
+          style: {
+            ...n.style,
+            zIndex: isDragging ? 1000 : n.style?.zIndex,
+          },
           data: {
             ...n.data,
             hasChildren: childIds.length > 0,
+            hasLeftChildren: leftChildIds.length > 0,
+            hasRightChildren: rightChildIds.length > 0,
             childCount: childIds.length,
+            leftChildCount: leftChildIds.length,
+            rightChildCount: rightChildIds.length,
             onToggleCollapse: handleToggleCollapse,
+            isDropTarget: n.id === dropTargetId,
+            isDragging,
+            growsLeft,
           },
         };
       }),
-    [nodes, childrenMap, hiddenNodeIds, focusedNodeId, handleToggleCollapse]
+    [
+      nodes,
+      edges,
+      childrenMap,
+      hiddenNodeIds,
+      focusedNodeId,
+      handleToggleCollapse,
+      dropTargetId,
+      draggingNodeId,
+    ]
   );
 
   const displayEdges = useMemo(
     () =>
-      edges.map((e) => ({
-        ...e,
-        hidden: hiddenNodeIds.has(e.source) || hiddenNodeIds.has(e.target),
-      })),
-    [edges, hiddenNodeIds]
+      edges.map((e) => {
+        const source = nodes.find((n) => n.id === e.source);
+        const target = nodes.find((n) => n.id === e.target);
+        const childIsLeft =
+          !!source &&
+          !!target &&
+          target.position.x < source.position.x;
+        return {
+          ...e,
+          hidden: hiddenNodeIds.has(e.source) || hiddenNodeIds.has(e.target),
+          sourceHandle: childIsLeft ? 'out-left' : 'out-right',
+          targetHandle: childIsLeft ? 'in-right' : 'in-left',
+        };
+      }),
+    [edges, nodes, hiddenNodeIds]
   );
 
   return (
@@ -512,8 +934,16 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
         onNodeClick={handleNodeClick}
         onNodeDoubleClick={handleNodeDoubleClick}
         onPaneClick={handlePaneClick}
+        onNodeDragStart={handleNodeDragStart}
+        onNodeDrag={handleNodeDrag}
         onNodeDragStop={handleNodeDragStop}
         nodeTypes={nodeTypes}
+        nodesDraggable
+        nodeDragThreshold={2}
+        panOnDrag
+        panOnScroll={false}
+        zoomOnPinch
+        preventScrolling
         deleteKeyCode={null}
         className="bg-gray-50"
         minZoom={0.1}
@@ -529,8 +959,8 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
             <p>Enter: 子ノード作成</p>
             <p>Backspace: 削除</p>
             <p>Tab: 切り替え</p>
-            <p>Drag: 並べ替え（自動整頓）</p>
-            <p>±ボタン: 子ノード表示/非表示</p>
+            <p>Drag: 並べ替え / 他ノードへドロップで親変更</p>
+            <p>±ボタン: 左右それぞれの子を表示/非表示</p>
           </div>
         </Panel>
       </ReactFlow>

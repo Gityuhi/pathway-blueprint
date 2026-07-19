@@ -45,19 +45,32 @@ const CustomNode = ({ id, data, selected }: NodeProps<NodeData>) => {
     <div
       className={clsx(
         'relative px-4 py-3 shadow-lg rounded-xl w-[280px] max-w-[280px] box-border',
-        'transition-colors duration-200 border overflow-visible',
-        deadlineClass || 'bg-white border-gray-100',
-        selected
-          ? deadlineClass
-            ? 'ring-2 ring-blue-200'
-            : 'border-blue-500 ring-2 ring-blue-200'
-          : ''
+        'transition-all duration-150 border overflow-visible',
+        data.isDropTarget
+          ? 'bg-emerald-50 border-emerald-500 ring-2 ring-emerald-300 scale-[1.02]'
+          : data.isDragging
+            ? 'bg-blue-50 border-blue-500 ring-2 ring-blue-400 shadow-2xl scale-[1.03] opacity-95'
+            : [
+                deadlineClass || 'bg-white border-gray-100',
+                selected
+                  ? deadlineClass
+                    ? 'ring-2 ring-blue-200'
+                    : 'border-blue-500 ring-2 ring-blue-200'
+                  : '',
+              ]
       )}
     >
       <Handle
         type="target"
         position={Position.Left}
+        id="in-left"
         className="!bg-gray-400 !w-3 !h-3 !-ml-1.5"
+      />
+      <Handle
+        type="target"
+        position={Position.Right}
+        id="in-right"
+        className="!bg-gray-400 !w-3 !h-3 !-mr-1.5"
       />
 
       <div className="flex flex-col gap-2">
@@ -141,17 +154,64 @@ const CustomNode = ({ id, data, selected }: NodeProps<NodeData>) => {
 
       <Handle
         type="source"
+        position={Position.Left}
+        id="out-left"
+        className="!bg-gray-400 !w-3 !h-3 !-ml-1.5"
+      />
+      <Handle
+        type="source"
         position={Position.Right}
+        id="out-right"
         className="!bg-gray-400 !w-3 !h-3 !-mr-1.5"
       />
 
-      {data.hasChildren && (
+      {data.hasLeftChildren && (
         <button
           type="button"
-          title={data.collapsed ? '子ノードを表示' : '子ノードを隠す'}
+          title={
+            data.collapsed || data.collapsedLeft
+              ? '左側の子ノードを表示'
+              : '左側の子ノードを隠す'
+          }
           onClick={(e) => {
             e.stopPropagation();
-            data.onToggleCollapse?.(id);
+            data.onToggleCollapse?.(id, 'left');
+          }}
+          onDoubleClick={(e) => e.stopPropagation()}
+          className={clsx(
+            'absolute -left-3 top-1/2 -translate-y-1/2 z-10',
+            'flex items-center justify-center gap-0.5 min-w-[22px] h-[22px] px-1',
+            'rounded-full border border-gray-300 bg-white text-gray-600',
+            'shadow-sm hover:bg-gray-50 hover:border-blue-400 hover:text-blue-600',
+            'transition-colors nodrag nopan'
+          )}
+        >
+          {data.collapsed || data.collapsedLeft ? (
+            <>
+              <Plus size={12} strokeWidth={2.5} />
+              {(data.leftChildCount ?? 0) > 0 && (
+                <span className="text-[10px] font-semibold leading-none">
+                  {data.leftChildCount}
+                </span>
+              )}
+            </>
+          ) : (
+            <Minus size={12} strokeWidth={2.5} />
+          )}
+        </button>
+      )}
+
+      {data.hasRightChildren && (
+        <button
+          type="button"
+          title={
+            data.collapsed || data.collapsedRight
+              ? '右側の子ノードを表示'
+              : '右側の子ノードを隠す'
+          }
+          onClick={(e) => {
+            e.stopPropagation();
+            data.onToggleCollapse?.(id, 'right');
           }}
           onDoubleClick={(e) => e.stopPropagation()}
           className={clsx(
@@ -162,12 +222,12 @@ const CustomNode = ({ id, data, selected }: NodeProps<NodeData>) => {
             'transition-colors nodrag nopan'
           )}
         >
-          {data.collapsed ? (
+          {data.collapsed || data.collapsedRight ? (
             <>
               <Plus size={12} strokeWidth={2.5} />
-              {(data.childCount ?? 0) > 0 && (
+              {(data.rightChildCount ?? 0) > 0 && (
                 <span className="text-[10px] font-semibold leading-none">
-                  {data.childCount}
+                  {data.rightChildCount}
                 </span>
               )}
             </>
