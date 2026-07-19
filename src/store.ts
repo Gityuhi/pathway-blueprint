@@ -161,6 +161,60 @@ export const saveRoadmaps = async (roadmaps: Roadmap[]): Promise<void> => {
     return;
   }
 
+  // upsert のみ。欠けた ID を DELETE しない（不完全配列の競合保存でデータ消失するため）
+  if (roadmaps.length === 0) return;
+
+  const userId = await requireUserId();
+
+  const rows = roadmaps.map((r) => ({
+    id: r.id,
+    user_id: userId,
+    title: r.title,
+    updated_at: new Date(r.updatedAt).toISOString(),
+    nodes: r.nodes,
+    edges: r.edges,
+  }));
+
+  const { error: upsertError } = await supabase.from('roadmaps').upsert(rows, {
+    onConflict: 'id',
+  });
+
+  if (upsertError) {
+    console.error('Failed to save roadmaps', upsertError);
+    throw upsertError;
+  }
+};
+
+/** 明示削除（UI の削除操作専用） */
+export const deleteRoadmap = async (id: string): Promise<void> => {
+  if (!isSupabaseConfigured) {
+    localSaveRoadmaps(localLoadRoadmaps().filter((r) => r.id !== id));
+    return;
+  }
+
+  const userId = await requireUserId();
+  const { error } = await supabase
+    .from('roadmaps')
+    .delete()
+    .eq('user_id', userId)
+    .eq('id', id);
+
+  if (error) {
+    console.error('Failed to delete roadmap', error);
+    throw error;
+  }
+};
+
+/**
+ * インポートなど「全置換」専用。
+ * 渡した配列に無いクラウド行だけ削除してから upsert する。
+ */
+export const replaceAllRoadmaps = async (roadmaps: Roadmap[]): Promise<void> => {
+  if (!isSupabaseConfigured) {
+    localSaveRoadmaps(roadmaps);
+    return;
+  }
+
   const userId = await requireUserId();
 
   const { data: existing, error: existingError } = await supabase
@@ -190,25 +244,7 @@ export const saveRoadmaps = async (roadmaps: Roadmap[]): Promise<void> => {
     }
   }
 
-  if (roadmaps.length === 0) return;
-
-  const rows = roadmaps.map((r) => ({
-    id: r.id,
-    user_id: userId,
-    title: r.title,
-    updated_at: new Date(r.updatedAt).toISOString(),
-    nodes: r.nodes,
-    edges: r.edges,
-  }));
-
-  const { error: upsertError } = await supabase.from('roadmaps').upsert(rows, {
-    onConflict: 'id',
-  });
-
-  if (upsertError) {
-    console.error('Failed to save roadmaps', upsertError);
-    throw upsertError;
-  }
+  await saveRoadmaps(roadmaps);
 };
 
 // --- Daily Logs ---
@@ -260,39 +296,13 @@ export const saveDailyLogs = async (logs: DailyLog[]): Promise<void> => {
     return;
   }
 
-  const userId = await requireUserId();
-
-  const { data: existing, error: existingError } = await supabase
-    .from('daily_logs')
-    .select('date')
-    .eq('user_id', userId);
-
-  if (existingError) {
-    console.error('Failed to list daily logs', existingError);
-    throw existingError;
-  }
-
-  const nextDates = new Set(logs.map((l) => l.date));
-  const toDelete = (existing ?? [])
-    .map((r) => r.date as string)
-    .filter((date) => !nextDates.has(date));
-
-  if (toDelete.length > 0) {
-    const { error: deleteError } = await supabase
-      .from('daily_logs')
-      .delete()
-      .eq('user_id', userId)
-      .in('date', toDelete);
-    if (deleteError) {
-      console.error('Failed to delete daily logs', deleteError);
-      throw deleteError;
-    }
-  }
-
+  // upsert のみ（欠けた日付の DELETE はしない）
   if (logs.length === 0) {
     setDailyLogsCache([]);
     return;
   }
+
+  const userId = await requireUserId();
 
   const rows = logs.map((l) => ({
     user_id: userId,

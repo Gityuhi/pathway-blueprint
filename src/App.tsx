@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import clsx from 'clsx';
 import Sidebar from './components/Sidebar';
 import type { AppTab } from './components/Sidebar';
@@ -12,6 +12,8 @@ import MobileMenuButton from './components/MobileMenuButton';
 import {
   loadRoadmaps,
   saveRoadmaps,
+  deleteRoadmap,
+  replaceAllRoadmaps,
   createInitialRoadmap,
   loadAssignedRoadmapId,
   saveAssignedRoadmapId,
@@ -37,6 +39,22 @@ function App() {
   const [roadmapDrawerOpen, setRoadmapDrawerOpen] = useState(false);
   const [booting, setBooting] = useState(true);
 
+  const roadmapsRef = useRef<Roadmap[]>([]);
+  const saveChainRef = useRef(Promise.resolve());
+
+  const setRoadmapsBoth = useCallback((next: Roadmap[]) => {
+    roadmapsRef.current = next;
+    setRoadmaps(next);
+  }, []);
+
+  /** 常に最新の roadmapsRef を直列で upsert（古いリクエストが新しい内容を上書きしない） */
+  const persistRoadmaps = useCallback(() => {
+    saveChainRef.current = saveChainRef.current
+      .catch(() => undefined)
+      .then(() => saveRoadmaps(roadmapsRef.current));
+    return saveChainRef.current;
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -51,13 +69,13 @@ function App() {
         setAssignedRoadmapId(assigned);
 
         if (loaded.length > 0) {
-          setRoadmaps(loaded);
+          setRoadmapsBoth(loaded);
           setActiveRoadmapId(loaded[0].id);
         } else {
+          // 空のときクラウドへ保存しない（誤って空読みした場合の全消しを防ぐ）
           const initial = createInitialRoadmap();
-          setRoadmaps([initial]);
+          setRoadmapsBoth([initial]);
           setActiveRoadmapId(initial.id);
-          await saveRoadmaps([initial]);
         }
       } catch (e) {
         console.error('Failed to boot app data', e);
@@ -70,7 +88,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [setRoadmapsBoth]);
 
   useEffect(() => {
     const now = new Date();
@@ -108,22 +126,29 @@ function App() {
 
   const handleCreateRoadmap = async () => {
     const newRoadmap = createInitialRoadmap();
-    const updatedList = [newRoadmap, ...roadmaps];
-    setRoadmaps(updatedList);
+    const updatedList = [newRoadmap, ...roadmapsRef.current];
+    setRoadmapsBoth(updatedList);
     setActiveRoadmapId(newRoadmap.id);
-    await saveRoadmaps(updatedList);
+    try {
+      await persistRoadmaps();
+    } catch (e) {
+      console.error(e);
+      alert('ロードマップの保存に失敗しました。');
+    }
   };
 
-  const handleSaveRoadmap = async (updatedRoadmap: Roadmap) => {
-    const updatedList = roadmaps.map((r) =>
+  const handleSaveRoadmap = (updatedRoadmap: Roadmap) => {
+    const updatedList = roadmapsRef.current.map((r) =>
       r.id === updatedRoadmap.id ? updatedRoadmap : r
     );
-    setRoadmaps(updatedList);
-    await saveRoadmaps(updatedList);
+    setRoadmapsBoth(updatedList);
+    void persistRoadmaps().catch((e) => {
+      console.error(e);
+    });
   };
 
   const handleDeleteRoadmap = async (id: string) => {
-    const updatedList = roadmaps.filter((r) => r.id !== id);
+    const updatedList = roadmapsRef.current.filter((r) => r.id !== id);
 
     let nextActiveId = activeRoadmapId;
     let finalRoadmaps = updatedList;
@@ -143,13 +168,21 @@ function App() {
       setAssignedRoadmapId(null);
     }
 
-    setRoadmaps(finalRoadmaps);
+    setRoadmapsBoth(finalRoadmaps);
     setActiveRoadmapId(nextActiveId);
-    await saveRoadmaps(finalRoadmaps);
+
+    try {
+      // 明示削除してから残りを upsert（saveRoadmaps は DELETE しない）
+      await deleteRoadmap(id);
+      await persistRoadmaps();
+    } catch (e) {
+      console.error(e);
+      alert('ロードマップの削除に失敗しました。');
+    }
   };
 
   const handleExportRoadmaps = () => {
-    downloadRoadmapExport(roadmaps);
+    downloadRoadmapExport(roadmapsRef.current);
   };
 
   const handleImportRoadmaps = (file: File) => {
@@ -165,16 +198,16 @@ function App() {
 
       if (
         !confirm(
-          `現在のロードマップ（${roadmaps.length}件）を、インポートした ${imported.length} 件で置き換えますか？`
+          `現在のロードマップ（${roadmapsRef.current.length}件）を、インポートした ${imported.length} 件で置き換えますか？`
         )
       ) {
         return;
       }
 
       try {
-        setRoadmaps(imported);
+        setRoadmapsBoth(imported);
         setActiveRoadmapId(imported[0].id);
-        await saveRoadmaps(imported);
+        await replaceAllRoadmaps(imported);
 
         const stillAssigned = imported.some((r) => r.id === assignedRoadmapId);
         if (!stillAssigned) {
