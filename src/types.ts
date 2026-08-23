@@ -49,6 +49,8 @@ export interface DailyTask {
 export interface RoutineTask {
   id: string;
   text: string;
+  /** false のとき翌日のルーティンタブに反映しない（省略時は true） */
+  enabled?: boolean;
 }
 
 /**

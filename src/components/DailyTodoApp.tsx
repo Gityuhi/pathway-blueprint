@@ -131,6 +131,52 @@ interface SortableTaskItemProps {
   isComposingRef: React.MutableRefObject<boolean>;
 }
 
+/** 直下の小タスク（indent がちょうど +1）を返す */
+function getDirectChildren(tasks: DailyTask[], parentIndex: number): DailyTask[] {
+  const parentLevel = tasks[parentIndex]?.indentLevel ?? 0;
+  const children: DailyTask[] = [];
+  for (let j = parentIndex + 1; j < tasks.length; j++) {
+    if (tasks[j].indentLevel <= parentLevel) break;
+    if (tasks[j].indentLevel === parentLevel + 1) {
+      children.push(tasks[j]);
+    }
+  }
+  return children;
+}
+
+/** テキストのある直下小タスク */
+function getCountableDirectChildren(tasks: DailyTask[], parentIndex: number): DailyTask[] {
+  return getDirectChildren(tasks, parentIndex).filter((t) => t.text.trim() !== '');
+}
+
+/** タブ内の残りタスク数（空・完了・親タスクは除外＝未完了の葉のみ） */
+function countRemainingTasks(tasks: DailyTask[]): number {
+  let count = 0;
+  for (let i = 0; i < tasks.length; i++) {
+    const t = tasks[i];
+    if (t.text.trim() === '') continue;
+    if (getCountableDirectChildren(tasks, i).length > 0) continue;
+    if (t.status !== 'done') count++;
+  }
+  return count;
+}
+
+/** 親タスクの status を直下小タスクの完了状況に同期 */
+function syncParentStatuses(tasks: DailyTask[]): DailyTask[] {
+  const next = tasks.map((t) => ({ ...t }));
+  for (let i = next.length - 1; i >= 0; i--) {
+    const children = getCountableDirectChildren(next, i);
+    if (children.length === 0) continue;
+    const allDone = children.every((c) => c.status === 'done');
+    if (allDone && next[i].status !== 'done') {
+      next[i] = { ...next[i], status: 'done' };
+    } else if (!allDone && next[i].status === 'done') {
+      next[i] = { ...next[i], status: 'todo' };
+    }
+  }
+  return next;
+}
+
 /** この行より下に、指定 depth の縦線を延長すべき後続タスクがあるか */
 function shouldContinueVerticalAtDepth(
   depth: number,
@@ -417,9 +463,16 @@ function SortableTaskItem({
     el.style.height = `${el.scrollHeight}px`;
   }, []);
 
+  const countableChildren = getCountableDirectChildren(visibleTasks, index);
+  const isParent = countableChildren.length > 0;
+  const allChildrenDone = isParent && countableChildren.every((c) => c.status === 'done');
+  const childCount = countableChildren.length;
+  const parentLooksDone = isParent && allChildrenDone;
+  const textLooksDone = isParent ? allChildrenDone : task.status === 'done';
+
   useEffect(() => {
-    if (isMobile) resizeTextArea();
-  }, [isMobile, task.text, indentPx, task.indentLevel, resizeTextArea]);
+    resizeTextArea();
+  }, [task.text, indentPx, task.indentLevel, resizeTextArea]);
 
   const setTextRef = useCallback(
     (el: HTMLInputElement | HTMLTextAreaElement | null) => {
@@ -500,79 +553,84 @@ function SortableTaskItem({
         />
         <button
           type="button"
-          onClick={() => toggleStatus(index)}
+          onClick={() => {
+            if (!isParent) toggleStatus(index);
+          }}
           onPointerDown={(e) => e.stopPropagation()}
           className={clsx(
             'flex-shrink-0 rounded-full border-[3px] flex items-center justify-center transition-all duration-200',
             'w-8 h-8 mt-1.5 md:w-10 md:h-10 md:mt-1',
-            task.status === 'todo' && 'border-gray-300 bg-white hover:border-gray-400',
-            task.status === 'doing' && 'border-blue-500 bg-blue-50 text-blue-500',
-            task.status === 'done' && 'border-green-500 bg-green-500 text-white'
+            isParent &&
+              parentLooksDone &&
+              'border-green-500 bg-green-500 text-white cursor-default',
+            isParent &&
+              !parentLooksDone &&
+              'border-gray-300 bg-white text-gray-600 cursor-default',
+            !isParent && task.status === 'todo' && 'border-gray-300 bg-white hover:border-gray-400',
+            !isParent && task.status === 'doing' && 'border-blue-500 bg-blue-50 text-blue-500',
+            !isParent && task.status === 'done' && 'border-green-500 bg-green-500 text-white'
           )}
+          aria-label={
+            isParent
+              ? parentLooksDone
+                ? '小タスク完了'
+                : `小タスク${childCount}件`
+              : undefined
+          }
         >
-          {task.status === 'doing' && <div className="w-3 h-3 md:w-4 md:h-4 bg-blue-500 rounded-full" />}
-          {task.status === 'done' && <CheckCircle2 size={20} strokeWidth={3} className="md:hidden" />}
-          {task.status === 'done' && <CheckCircle2 size={24} strokeWidth={3} className="hidden md:block" />}
+          {isParent && parentLooksDone && (
+            <>
+              <CheckCircle2 size={20} strokeWidth={3} className="md:hidden" />
+              <CheckCircle2 size={24} strokeWidth={3} className="hidden md:block" />
+            </>
+          )}
+          {isParent && !parentLooksDone && (
+            <span className="text-xs md:text-sm font-bold tabular-nums leading-none">
+              {childCount}
+            </span>
+          )}
+          {!isParent && task.status === 'doing' && (
+            <div className="w-3 h-3 md:w-4 md:h-4 bg-blue-500 rounded-full" />
+          )}
+          {!isParent && task.status === 'done' && (
+            <>
+              <CheckCircle2 size={20} strokeWidth={3} className="md:hidden" />
+              <CheckCircle2 size={24} strokeWidth={3} className="hidden md:block" />
+            </>
+          )}
         </button>
-        {isMobile ? (
-          <textarea
-            ref={setTextRef}
-            value={task.text}
-            rows={1}
-            onChange={(e) => {
-              updateText(index, e.target.value);
-              requestAnimationFrame(resizeTextArea);
-            }}
-            onKeyDown={(e) => handleKeyDown(e, index)}
-            onPaste={(e) => handlePaste(e, index)}
-            onBlur={() => onTextBlur()}
-            onPointerDown={() => {
-              // モバイル: 長押しドラッグを行全体で受けたいので伝播させる
-            }}
-            onCompositionStart={() => {
-              isComposingRef.current = true;
-            }}
-            onCompositionEnd={() => {
-              isComposingRef.current = false;
-            }}
-            placeholder="Write a task..."
-            className={clsx(
-              'flex-1 min-w-0 bg-transparent border-none outline-none py-1 font-medium placeholder-gray-300 transition-all leading-relaxed',
-              'text-xl resize-none overflow-hidden break-words whitespace-pre-wrap',
-              task.status === 'done' &&
-                'text-gray-300 line-through decoration-gray-300 decoration-2',
-              task.status !== 'done' && 'text-gray-800'
-            )}
-          />
-        ) : (
-          <input
-            ref={setTextRef}
-            value={task.text}
-            onChange={(e) => updateText(index, e.target.value)}
-            onKeyDown={(e) => handleKeyDown(e, index)}
-            onPaste={(e) => handlePaste(e, index)}
-            onBlur={() => onTextBlur()}
-            onPointerDown={(e) => {
-              e.stopPropagation();
-            }}
-            onCompositionStart={() => {
-              isComposingRef.current = true;
-            }}
-            onCompositionEnd={() => {
-              isComposingRef.current = false;
-            }}
-            placeholder="Write a task..."
-            className={clsx(
-              'flex-1 min-w-0 bg-transparent border-none outline-none py-1 font-medium placeholder-gray-300 transition-all leading-relaxed',
-              'text-3xl',
-              task.status === 'done' &&
-                'text-gray-300 line-through decoration-gray-300 decoration-2',
-              task.status !== 'done' && 'text-gray-800'
-            )}
-          />
-        )}
-        <div className="mt-3 md:mt-4 opacity-0 group-hover:opacity-100 text-xs text-gray-300 font-mono transition-opacity hidden md:block">
-          {task.status.toUpperCase()}
+        <textarea
+          ref={setTextRef}
+          value={task.text}
+          rows={1}
+          onChange={(e) => {
+            updateText(index, e.target.value);
+            requestAnimationFrame(resizeTextArea);
+          }}
+          onKeyDown={(e) => handleKeyDown(e, index)}
+          onPaste={(e) => handlePaste(e, index)}
+          onBlur={() => onTextBlur()}
+          onPointerDown={(e) => {
+            // PC: 行ドラッグと競合しないよう入力側で止める / モバイル: 長押しドラッグのため伝播
+            if (!isMobile) e.stopPropagation();
+          }}
+          onCompositionStart={() => {
+            isComposingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            isComposingRef.current = false;
+          }}
+          placeholder="Write a task..."
+          className={clsx(
+            'flex-1 min-w-0 bg-transparent border-none outline-none py-1 font-medium placeholder-gray-300 transition-all leading-relaxed',
+            'resize-none overflow-hidden break-words whitespace-pre-wrap',
+            isMobile ? 'text-xl' : 'text-3xl',
+            textLooksDone && 'text-gray-300 line-through decoration-gray-300 decoration-2',
+            !textLooksDone && 'text-gray-800'
+          )}
+        />
+        <div className="mt-3 md:mt-4 opacity-0 group-hover:opacity-100 text-xs text-gray-300 font-mono transition-opacity hidden md:block flex-shrink-0">
+          {isParent ? (parentLooksDone ? 'DONE' : String(childCount)) : task.status.toUpperCase()}
         </div>
       </div>
     </div>
@@ -647,6 +705,169 @@ function emptyTask(goalId: string | null): DailyTask {
     indentLevel: 0,
     goalId,
   };
+}
+
+/**
+ * その他タブの未完了タスクを翌日へ引き継ぐ。
+ * 完了済み・空テキストは除外し、階層は残った祖先に合わせて詰め直す。
+ */
+function carryIncompleteOtherTasks(previousLog: DailyLog | undefined): DailyTask[] {
+  const otherTasks = (previousLog?.tasks ?? []).filter(isOtherTask);
+  if (otherTasks.length === 0) return [emptyTask(OTHER_TAB)];
+
+  type Frame = { oldIndent: number; newIndent: number | null };
+  const stack: Frame[] = [];
+  const carried: DailyTask[] = [];
+
+  for (const task of otherTasks) {
+    while (stack.length > 0 && stack[stack.length - 1].oldIndent >= task.indentLevel) {
+      stack.pop();
+    }
+
+    const shouldCarry = task.status !== 'done' && task.text.trim() !== '';
+    if (shouldCarry) {
+      let newIndent = 0;
+      for (let i = stack.length - 1; i >= 0; i--) {
+        if (stack[i].newIndent !== null) {
+          newIndent = (stack[i].newIndent as number) + 1;
+          break;
+        }
+      }
+      carried.push({
+        id: generateId(),
+        text: task.text,
+        status: task.status === 'doing' ? 'doing' : 'todo',
+        indentLevel: Math.min(5, newIndent),
+        goalId: OTHER_TAB,
+      });
+      stack.push({ oldIndent: task.indentLevel, newIndent });
+    } else {
+      stack.push({ oldIndent: task.indentLevel, newIndent: null });
+    }
+  }
+
+  return carried.length > 0 ? carried : [emptyTask(OTHER_TAB)];
+}
+
+function TabRemainingBadge({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <span
+      className={clsx(
+        'inline-flex items-center justify-center flex-shrink-0',
+        'min-w-[1.25rem] h-5 px-1 rounded-full border border-current',
+        'text-[11px] font-semibold tabular-nums leading-none'
+      )}
+      aria-label={`残り${count}件`}
+    >
+      {count > 99 ? '99+' : count}
+    </span>
+  );
+}
+
+interface SortableRoutineItemProps {
+  routine: RoutineTask;
+  isMobile: boolean;
+  onUpdateText: (id: string, text: string) => void;
+  onToggleEnabled: (id: string, enabled: boolean) => void;
+  onDelete: (id: string) => void;
+}
+
+function SortableRoutineItem({
+  routine,
+  isMobile,
+  onUpdateText,
+  onToggleEnabled,
+  onDelete,
+}: SortableRoutineItemProps) {
+  const enabled = routine.enabled !== false;
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: routine.id });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 10 : 0,
+    opacity: isDragging ? 0.5 : 1,
+    touchAction: isMobile ? 'pan-y' : undefined,
+  };
+
+  const dragListeners = isMobile ? listeners : undefined;
+  const handleListeners = !isMobile ? listeners : undefined;
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={clsx(
+        'flex items-center gap-3 md:gap-4 bg-white p-4 rounded-xl shadow-sm border border-gray-100 group',
+        isDragging && 'shadow-md ring-2 ring-blue-100',
+        !enabled && 'opacity-70'
+      )}
+      {...attributes}
+      {...(dragListeners ?? {})}
+    >
+      <div
+        {...(handleListeners ?? {})}
+        className="p-1 text-gray-300 hover:text-gray-600 cursor-grab active:cursor-grabbing flex-shrink-0"
+        aria-hidden="true"
+      >
+        <GripVertical size={20} />
+      </div>
+
+      <select
+        value={enabled ? 'on' : 'off'}
+        onChange={(e) => onToggleEnabled(routine.id, e.target.value === 'on')}
+        onPointerDown={(e) => e.stopPropagation()}
+        aria-label={`${routine.text || 'ルーティンタスク'}の有効/無効`}
+        className={clsx(
+          'flex-shrink-0 w-[4.5rem] px-2 py-1.5 rounded-lg border text-xs font-semibold tabular-nums',
+          'focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500',
+          enabled
+            ? 'border-blue-200 bg-blue-50 text-blue-700'
+            : 'border-gray-200 bg-gray-50 text-gray-500'
+        )}
+      >
+        <option value="on">ON</option>
+        <option value="off">OFF</option>
+      </select>
+
+      <div
+        className={clsx(
+          'w-2 h-10 rounded-full flex-shrink-0 transition-colors',
+          enabled ? 'bg-blue-400' : 'bg-gray-200'
+        )}
+        aria-hidden="true"
+      />
+
+      <input
+        value={routine.text}
+        onChange={(e) => onUpdateText(routine.id, e.target.value)}
+        onPointerDown={(e) => e.stopPropagation()}
+        placeholder="例: 朝の読書、スクワット20回..."
+        className={clsx(
+          'flex-1 min-w-0 text-xl font-medium outline-none border-none placeholder-gray-300',
+          !enabled && 'text-gray-400'
+        )}
+      />
+
+      <button
+        type="button"
+        onClick={() => onDelete(routine.id)}
+        onPointerDown={(e) => e.stopPropagation()}
+        className="p-2 text-gray-300 hover:text-red-500 transition-colors flex-shrink-0"
+        aria-label="削除"
+      >
+        <Trash2 size={20} />
+      </button>
+    </div>
+  );
 }
 
 export default function DailyTodoApp({
@@ -838,9 +1059,10 @@ export default function DailyTodoApp({
           const prev = findPreviousDailyLog(selectedDate, currentLogs);
           const carriedGoals = resolveInitialGoalIds(prev);
 
+          const activeRoutines = routines.filter((r) => r.enabled !== false);
           const routineList: DailyTask[] =
-            routines.length > 0
-              ? routines.map((r) => ({
+            activeRoutines.length > 0
+              ? activeRoutines.map((r) => ({
                   id: generateId(),
                   text: r.text,
                   status: 'todo' as DailyTaskStatus,
@@ -850,9 +1072,10 @@ export default function DailyTodoApp({
               : [emptyTask(null)];
 
           const goalPlaceholderTasks = carriedGoals.map((gid) => emptyTask(gid));
+          const otherTasks = carryIncompleteOtherTasks(prev);
           const initialTasks = [
             ...routineList,
-            emptyTask(OTHER_TAB),
+            ...otherTasks,
             ...goalPlaceholderTasks,
           ];
 
@@ -907,6 +1130,19 @@ export default function DailyTodoApp({
     }
     return allTasks.filter((t) => t.goalId === activeTab);
   }, [allTasks, activeTab]);
+
+  const remainingByTab = useMemo(() => {
+    const routine = countRemainingTasks(allTasks.filter(isRoutineTask));
+    const other = countRemainingTasks(allTasks.filter(isOtherTask));
+    const goals = new Map<string, number>();
+    for (const goalId of activeGoalIds) {
+      goals.set(
+        goalId,
+        countRemainingTasks(allTasks.filter((t) => t.goalId === goalId))
+      );
+    }
+    return { routine, other, goals };
+  }, [allTasks, activeGoalIds]);
 
   const achievementRate = useMemo(
     () => calcDailyAchievementRate(allTasks),
@@ -984,12 +1220,12 @@ export default function DailyTodoApp({
         : Math.min(5, visibleTasks[index].indentLevel + 1);
       const newVisible = [...visibleTasks];
       newVisible[index] = { ...newVisible[index], indentLevel: newLevel };
-      updateVisibleAndSave(newVisible);
+      updateVisibleAndSave(syncParentStatuses(newVisible));
     } else if (e.key === 'Backspace') {
       if (visibleTasks[index].text === '' && visibleTasks.length > 1) {
         e.preventDefault();
         const newVisible = visibleTasks.filter((_, i) => i !== index);
-        updateVisibleAndSave(newVisible);
+        updateVisibleAndSave(syncParentStatuses(newVisible));
         setTimeout(() => inputRefs.current[Math.max(0, index - 1)]?.focus(), 0);
       }
     } else if (e.key === 'ArrowUp') {
@@ -1049,7 +1285,7 @@ export default function DailyTodoApp({
     const next = current === 'todo' ? 'doing' : current === 'doing' ? 'done' : 'todo';
     const newVisible = [...visibleTasks];
     newVisible[index] = { ...newVisible[index], status: next };
-    updateVisibleAndSave(newVisible);
+    updateVisibleAndSave(syncParentStatuses(newVisible));
   };
 
   const updateText = (index: number, text: string) => {
@@ -1082,7 +1318,7 @@ export default function DailyTodoApp({
       if (newLevel === current.indentLevel) return;
       const newVisible = [...visibleTasks];
       newVisible[index] = { ...newVisible[index], indentLevel: newLevel };
-      updateVisibleAndSave(newVisible);
+      updateVisibleAndSave(syncParentStatuses(newVisible));
     },
     [visibleTasks, updateVisibleAndSave]
   );
@@ -1150,7 +1386,7 @@ export default function DailyTodoApp({
   };
 
   const addRoutine = () => {
-    const newRoutines = [...routineTasks, { id: generateId(), text: '' }];
+    const newRoutines = [...routineTasks, { id: generateId(), text: '', enabled: true }];
     setRoutineTasks(newRoutines);
     void saveRoutineTasks(newRoutines);
   };
@@ -1162,6 +1398,25 @@ export default function DailyTodoApp({
     routineSaveTimerRef.current = setTimeout(() => {
       void saveRoutineTasks(newRoutines);
     }, TEXT_SAVE_DEBOUNCE_MS);
+  };
+
+  const toggleRoutineEnabled = (id: string, enabled: boolean) => {
+    const newRoutines = routineTasks.map((r) =>
+      r.id === id ? { ...r, enabled } : r
+    );
+    setRoutineTasks(newRoutines);
+    void saveRoutineTasks(newRoutines);
+  };
+
+  const handleRoutineDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIndex = routineTasks.findIndex((r) => r.id === active.id);
+    const newIndex = routineTasks.findIndex((r) => r.id === over.id);
+    if (oldIndex === -1 || newIndex === -1) return;
+    const newRoutines = arrayMove(routineTasks, oldIndex, newIndex);
+    setRoutineTasks(newRoutines);
+    void saveRoutineTasks(newRoutines);
   };
 
   const deleteRoutine = (id: string) => {
@@ -1429,24 +1684,26 @@ export default function DailyTodoApp({
               <button
                 onClick={() => handleSelectTab(ROUTINE_TAB)}
                 className={clsx(
-                  'px-3 md:px-4 py-2 md:py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors whitespace-nowrap',
+                  'px-3 md:px-4 py-2 md:py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors whitespace-nowrap inline-flex items-center gap-1.5',
                   activeTab === ROUTINE_TAB
                     ? 'border-blue-600 text-blue-700 bg-blue-50/50'
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
                 )}
               >
+                <TabRemainingBadge count={remainingByTab.routine} />
                 ルーティン
               </button>
 
               <button
                 onClick={() => handleSelectTab(OTHER_TAB)}
                 className={clsx(
-                  'px-3 md:px-4 py-2 md:py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors whitespace-nowrap',
+                  'px-3 md:px-4 py-2 md:py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors whitespace-nowrap inline-flex items-center gap-1.5',
                   activeTab === OTHER_TAB
                     ? 'border-blue-600 text-blue-700 bg-blue-50/50'
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
                 )}
               >
+                <TabRemainingBadge count={remainingByTab.other} />
                 その他
               </button>
 
@@ -1460,8 +1717,12 @@ export default function DailyTodoApp({
                       : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
                   )}
                 >
-                  <button onClick={() => handleSelectTab(goalId)} className="max-w-[160px] truncate">
-                    {goalTitleMap.get(goalId) || '目標'}
+                  <button
+                    onClick={() => handleSelectTab(goalId)}
+                    className="max-w-[160px] inline-flex items-center gap-1.5 min-w-0"
+                  >
+                    <TabRemainingBadge count={remainingByTab.goals.get(goalId) ?? 0} />
+                    <span className="truncate">{goalTitleMap.get(goalId) || '目標'}</span>
                   </button>
                   <button
                     type="button"
@@ -1542,7 +1803,9 @@ export default function DailyTodoApp({
                   </button>
                   <div>
                     <h1 className="text-2xl md:text-3xl font-bold text-gray-800">Routine Tasks</h1>
-                    <p className="text-sm md:text-base text-gray-500">毎日自動的に追加されるタスクを設定します</p>
+                    <p className="text-sm md:text-base text-gray-500">
+                      毎日自動的に追加されるタスクを設定します。OFFにしたタスクは翌日のToDoに反映されません。
+                    </p>
                   </div>
                 </div>
                 <button
@@ -1564,26 +1827,29 @@ export default function DailyTodoApp({
                     </p>
                   </div>
                 ) : (
-                  routineTasks.map((routine) => (
-                    <div
-                      key={routine.id}
-                      className="flex items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-gray-100 group"
+                  <DndContext
+                    sensors={sensors}
+                    collisionDetection={closestCenter}
+                    onDragEnd={handleRoutineDragEnd}
+                  >
+                    <SortableContext
+                      items={routineTasks.map((r) => r.id)}
+                      strategy={verticalListSortingStrategy}
                     >
-                      <div className="w-2 h-10 bg-blue-400 rounded-full" />
-                      <input
-                        value={routine.text}
-                        onChange={(e) => updateRoutine(routine.id, e.target.value)}
-                        placeholder="例: 朝の読書、スクワット20回..."
-                        className="flex-1 text-xl font-medium outline-none border-none placeholder-gray-300"
-                      />
-                      <button
-                        onClick={() => deleteRoutine(routine.id)}
-                        className="p-2 text-gray-300 hover:text-red-500 transition-colors"
-                      >
-                        <Trash2 size={20} />
-                      </button>
-                    </div>
-                  ))
+                      <div className="space-y-4">
+                        {routineTasks.map((routine) => (
+                          <SortableRoutineItem
+                            key={routine.id}
+                            routine={routine}
+                            isMobile={isMobile}
+                            onUpdateText={updateRoutine}
+                            onToggleEnabled={toggleRoutineEnabled}
+                            onDelete={deleteRoutine}
+                          />
+                        ))}
+                      </div>
+                    </SortableContext>
+                  </DndContext>
                 )}
               </div>
             </div>

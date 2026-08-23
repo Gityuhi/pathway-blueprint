@@ -106,11 +106,17 @@ const localSaveDailyLogs = (logs: DailyLog[]) => {
   localStorage.setItem(DAILY_STORAGE_KEY, JSON.stringify(logs));
 };
 
+const normalizeRoutineTasks = (tasks: RoutineTask[]): RoutineTask[] =>
+  tasks.map((t) => ({
+    ...t,
+    enabled: t.enabled !== false,
+  }));
+
 const localLoadRoutineTasks = (): RoutineTask[] => {
   const data = localStorage.getItem(ROUTINE_STORAGE_KEY);
   if (!data) return [];
   try {
-    return JSON.parse(data);
+    return normalizeRoutineTasks(JSON.parse(data) as RoutineTask[]);
   } catch (e) {
     console.error('Failed to parse routine tasks', e);
     return [];
@@ -416,7 +422,7 @@ async function loadUserSettings(): Promise<{
   }
 
   userSettingsCache = {
-    routineTasks: (data?.routine_tasks as RoutineTask[]) ?? [],
+    routineTasks: normalizeRoutineTasks((data?.routine_tasks as RoutineTask[]) ?? []),
     assignedRoadmapId: (data?.assigned_roadmap_id as string | null) ?? null,
   };
   routineTasksCache = userSettingsCache.routineTasks;
@@ -457,13 +463,13 @@ async function upsertUserSettings(patch: {
 
 export const loadRoutineTasks = async (): Promise<RoutineTask[]> => {
   if (!isSupabaseConfigured) {
-    if (routineTasksCache) return routineTasksCache;
+    if (routineTasksCache) return normalizeRoutineTasks(routineTasksCache);
     routineTasksCache = localLoadRoutineTasks();
     return routineTasksCache;
   }
-  if (routineTasksCache) return routineTasksCache;
+  if (routineTasksCache) return normalizeRoutineTasks(routineTasksCache);
   const settings = await loadUserSettings();
-  return settings.routineTasks;
+  return normalizeRoutineTasks(settings.routineTasks);
 };
 
 export const saveRoutineTasks = async (tasks: RoutineTask[]): Promise<void> => {
