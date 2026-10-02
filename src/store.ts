@@ -1,5 +1,12 @@
 import type { Node, Edge } from 'reactflow';
-import type { NodeData, DailyLog, RoutineTask, DailyTask } from './types';
+import type {
+  NodeData,
+  DailyLog,
+  RoutineTask,
+  RoutineFrequency,
+  DailyTask,
+  BacklogTask,
+} from './types';
 import { isSupabaseConfigured, requireUserId, supabase } from './lib/supabase';
 
 export interface Roadmap {
@@ -14,14 +21,17 @@ const STORAGE_KEY = 'pathway-roadmaps';
 const DAILY_STORAGE_KEY = 'pathway-daily-logs';
 const ROUTINE_STORAGE_KEY = 'pathway-routine-tasks';
 const ASSIGNED_ROADMAP_KEY = 'pathway-assigned-roadmap-id';
+const BACKLOG_STORAGE_KEY = 'pathway-backlog-tasks';
 
 /** セッション中のメモリキャッシュ（タブ切替の再取得を防ぐ） */
 let dailyLogsCache: DailyLog[] | null = null;
 let dailyLogsInflight: Promise<DailyLog[]> | null = null;
 let routineTasksCache: RoutineTask[] | null = null;
+let backlogTasksCache: BacklogTask[] | null = null;
 let userSettingsCache: {
   routineTasks: RoutineTask[];
   assignedRoadmapId: string | null;
+  backlogTasks: BacklogTask[];
 } | null = null;
 
 const setDailyLogsCache = (logs: DailyLog[]) => {
@@ -107,10 +117,69 @@ const localSaveDailyLogs = (logs: DailyLog[]) => {
 };
 
 const normalizeRoutineTasks = (tasks: RoutineTask[]): RoutineTask[] =>
-  tasks.map((t) => ({
-    ...t,
-    enabled: t.enabled !== false,
-  }));
+  tasks.map((t) => normalizeRoutineTask(t));
+
+const clampInt = (n: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, Math.round(n)));
+
+export const normalizeRoutineTask = (t: RoutineTask): RoutineTask => {
+  const frequency: RoutineFrequency =
+    t.frequency ?? (t.enabled === false ? 'off' : 'daily');
+
+  const weekDay =
+    typeof t.weekDay === 'number' && Number.isFinite(t.weekDay)
+      ? clampInt(t.weekDay, 0, 6)
+      : new Date().getDay();
+
+  const monthDay =
+    typeof t.monthDay === 'number' && Number.isFinite(t.monthDay)
+      ? clampInt(t.monthDay, 1, 31)
+      : new Date().getDate();
+
+  const weekDays = Array.isArray(t.weekDays)
+    ? [...new Set(
+        t.weekDays
+          .filter((d): d is number => typeof d === 'number' && Number.isFinite(d))
+          .map((d) => clampInt(d, 0, 6))
+      )].sort((a, b) => a - b)
+    : frequency === 'custom'
+      ? [new Date().getDay()]
+      : [];
+
+  return {
+    id: t.id,
+    text: t.text ?? '',
+    frequency,
+    weekDay,
+    monthDay,
+    weekDays,
+  };
+};
+
+/** 指定日にそのルーティンを日次 ToDo へ載せるか */
+export const isRoutineActiveOnDate = (
+  routine: RoutineTask,
+  date: Date = new Date()
+): boolean => {
+  const r = normalizeRoutineTask(routine);
+  switch (r.frequency) {
+    case 'off':
+      return false;
+    case 'daily':
+      return true;
+    case 'weekly':
+      return date.getDay() === (r.weekDay ?? 0);
+    case 'monthly': {
+      const daysInMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+      const target = Math.min(r.monthDay ?? 1, daysInMonth);
+      return date.getDate() === target;
+    }
+    case 'custom':
+      return (r.weekDays ?? []).includes(date.getDay());
+    default:
+      return false;
+  }
+};
 
 const localLoadRoutineTasks = (): RoutineTask[] => {
   const data = localStorage.getItem(ROUTINE_STORAGE_KEY);
@@ -133,6 +202,42 @@ const localLoadAssignedRoadmapId = (): string | null =>
 const localSaveAssignedRoadmapId = (roadmapId: string | null) => {
   if (roadmapId) localStorage.setItem(ASSIGNED_ROADMAP_KEY, roadmapId);
   else localStorage.removeItem(ASSIGNED_ROADMAP_KEY);
+};
+
+const normalizeBacklogPriority = (value: unknown): BacklogTask['priority'] => {
+  if (value === 'high' || value === 'medium' || value === 'low') return value;
+  // 旧数値 priority の互換（大きいほど高）
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (value >= 2) return 'high';
+    if (value >= 1) return 'medium';
+    return 'low';
+  }
+  return 'medium';
+};
+
+const normalizeBacklogTasks = (tasks: BacklogTask[]): BacklogTask[] =>
+  tasks.map((t) => ({
+    id: t.id,
+    text: t.text ?? '',
+    completed: Boolean(t.completed),
+    priority: normalizeBacklogPriority(t.priority),
+    createdAt: t.createdAt || new Date().toISOString(),
+    completedAt: t.completedAt ?? null,
+  }));
+
+const localLoadBacklogTasks = (): BacklogTask[] => {
+  const data = localStorage.getItem(BACKLOG_STORAGE_KEY);
+  if (!data) return [];
+  try {
+    return normalizeBacklogTasks(JSON.parse(data) as BacklogTask[]);
+  } catch (e) {
+    console.error('Failed to parse backlog tasks', e);
+    return [];
+  }
+};
+
+const localSaveBacklogTasks = (tasks: BacklogTask[]) => {
+  localStorage.setItem(BACKLOG_STORAGE_KEY, JSON.stringify(tasks));
 };
 
 // --- Roadmaps ---
@@ -406,13 +511,14 @@ export const calcDailyAchievementRate = (tasks: DailyTask[]): number => {
 async function loadUserSettings(): Promise<{
   routineTasks: RoutineTask[];
   assignedRoadmapId: string | null;
+  backlogTasks: BacklogTask[];
 }> {
   if (userSettingsCache) return userSettingsCache;
 
   const userId = await requireUserId();
   const { data, error } = await supabase
     .from('user_settings')
-    .select('routine_tasks, assigned_roadmap_id')
+    .select('routine_tasks, assigned_roadmap_id, backlog_tasks')
     .eq('user_id', userId)
     .maybeSingle();
 
@@ -424,14 +530,17 @@ async function loadUserSettings(): Promise<{
   userSettingsCache = {
     routineTasks: normalizeRoutineTasks((data?.routine_tasks as RoutineTask[]) ?? []),
     assignedRoadmapId: (data?.assigned_roadmap_id as string | null) ?? null,
+    backlogTasks: normalizeBacklogTasks((data?.backlog_tasks as BacklogTask[]) ?? []),
   };
   routineTasksCache = userSettingsCache.routineTasks;
+  backlogTasksCache = userSettingsCache.backlogTasks;
   return userSettingsCache;
 }
 
 async function upsertUserSettings(patch: {
   routineTasks?: RoutineTask[];
   assignedRoadmapId?: string | null;
+  backlogTasks?: BacklogTask[];
 }): Promise<void> {
   const userId = await requireUserId();
   const current = await loadUserSettings();
@@ -443,6 +552,7 @@ async function upsertUserSettings(patch: {
       patch.assignedRoadmapId !== undefined
         ? patch.assignedRoadmapId
         : current.assignedRoadmapId,
+    backlog_tasks: patch.backlogTasks ?? current.backlogTasks,
   };
 
   const { error } = await supabase.from('user_settings').upsert(row, {
@@ -457,8 +567,10 @@ async function upsertUserSettings(patch: {
   userSettingsCache = {
     routineTasks: row.routine_tasks as RoutineTask[],
     assignedRoadmapId: row.assigned_roadmap_id,
+    backlogTasks: row.backlog_tasks as BacklogTask[],
   };
   routineTasksCache = userSettingsCache.routineTasks;
+  backlogTasksCache = userSettingsCache.backlogTasks;
 }
 
 export const loadRoutineTasks = async (): Promise<RoutineTask[]> => {
@@ -493,6 +605,67 @@ export const saveAssignedRoadmapId = async (roadmapId: string | null): Promise<v
     return;
   }
   await upsertUserSettings({ assignedRoadmapId: roadmapId });
+};
+
+// --- Backlog ---
+
+export const loadBacklogTasks = async (): Promise<BacklogTask[]> => {
+  if (!isSupabaseConfigured) {
+    if (backlogTasksCache) return normalizeBacklogTasks(backlogTasksCache);
+    backlogTasksCache = localLoadBacklogTasks();
+    return backlogTasksCache;
+  }
+  if (backlogTasksCache) return normalizeBacklogTasks(backlogTasksCache);
+  const settings = await loadUserSettings();
+  return normalizeBacklogTasks(settings.backlogTasks);
+};
+
+export const saveBacklogTasks = async (tasks: BacklogTask[]): Promise<void> => {
+  const normalized = normalizeBacklogTasks(tasks);
+  if (!isSupabaseConfigured) {
+    localSaveBacklogTasks(normalized);
+    backlogTasksCache = normalized;
+    return;
+  }
+  await upsertUserSettings({ backlogTasks: normalized });
+};
+
+/** 日次ログの「その他」未完了を Backlog へ一度だけ移行 */
+export const migrateOtherTasksToBacklog = async (
+  logs: DailyLog[]
+): Promise<BacklogTask[]> => {
+  const existing = await loadBacklogTasks();
+  const migratedKey = 'pathway-other-to-backlog-migrated';
+  if (typeof localStorage !== 'undefined' && localStorage.getItem(migratedKey) === '1') {
+    return existing;
+  }
+  if (existing.length > 0) {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(migratedKey, '1');
+    return existing;
+  }
+
+  const sorted = [...logs].sort((a, b) => b.date.localeCompare(a.date));
+  const source = sorted.find((l) => l.tasks.some((t) => t.goalId === 'other' && t.text.trim()));
+  if (!source) {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(migratedKey, '1');
+    return existing;
+  }
+
+  const migrated: BacklogTask[] = source.tasks
+    .filter((t) => t.goalId === 'other' && t.text.trim() !== '' && t.status !== 'done')
+    .map((t) => ({
+      id: generateId(),
+      text: t.text,
+      completed: false,
+      priority: 'medium' as const,
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+    }));
+
+  const next = [...existing, ...migrated];
+  await saveBacklogTasks(next);
+  if (typeof localStorage !== 'undefined') localStorage.setItem(migratedKey, '1');
+  return next;
 };
 
 // --- Roadmap Import / Export ---

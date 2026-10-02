@@ -5,6 +5,7 @@ import type { AppTab } from './components/Sidebar';
 import RoadmapList from './components/RoadmapList';
 import RoadmapEditor from './components/RoadmapEditor';
 import DailyTodoApp from './components/DailyTodoApp';
+import BacklogApp from './components/BacklogApp';
 import ActivityHeatmap from './components/ActivityHeatmap';
 import AssignRoadmapApp from './components/AssignRoadmapApp';
 import MobileDrawer from './components/MobileDrawer';
@@ -310,6 +311,15 @@ function App() {
           roadmaps={roadmaps}
           assignedRoadmapId={assignedRoadmapId}
         />
+      </div>
+
+      <div
+        className={clsx(
+          'flex-1 min-h-0 min-w-0',
+          activeTab === 'backlog' ? 'flex' : 'hidden'
+        )}
+      >
+        <BacklogApp />
       </div>
 
       <div

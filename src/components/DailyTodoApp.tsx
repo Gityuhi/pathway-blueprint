@@ -12,6 +12,8 @@ import {
   Square,
   CheckSquare,
   X,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import clsx from 'clsx';
 import MobileDrawer from './MobileDrawer';
@@ -42,13 +44,23 @@ import {
   generateId,
   findPreviousDailyLog,
   calcDailyAchievementRate,
+  migrateOtherTasksToBacklog,
+  isRoutineActiveOnDate,
   type Roadmap,
 } from '../store';
-import type { DailyLog, DailyTask, DailyTaskStatus, RoutineTask } from '../types';
+import type {
+  DailyLog,
+  DailyTask,
+  DailyTaskStatus,
+  RoutineTask,
+  RoutineFrequency,
+} from '../types';
 
 const ROUTINE_TAB = 'routine' as const;
-/** 例外タスク用の固定タブ（ロードマップ目標とは別） */
+/** 旧「その他」タブ（履歴互換用。新規作成はしない） */
 const OTHER_TAB = 'other' as const;
+
+type BlockId = typeof ROUTINE_TAB | string;
 
 const SWIPE_THRESHOLD = 56;
 const MAX_SWIPE_DX = 72;
@@ -149,7 +161,7 @@ function getCountableDirectChildren(tasks: DailyTask[], parentIndex: number): Da
   return getDirectChildren(tasks, parentIndex).filter((t) => t.text.trim() !== '');
 }
 
-/** タブ内の残りタスク数（空・完了・親タスクは除外＝未完了の葉のみ） */
+/** タブ／ブロック内の残りタスク数（空・完了・親タスクは除外＝未完了の葉のみ） */
 function countRemainingTasks(tasks: DailyTask[]): number {
   let count = 0;
   for (let i = 0; i < tasks.length; i++) {
@@ -159,6 +171,20 @@ function countRemainingTasks(tasks: DailyTask[]): number {
     if (t.status !== 'done') count++;
   }
   return count;
+}
+
+/** 進捗表示用: 空でない葉タスクの done / total */
+function countBlockProgress(tasks: DailyTask[]): { done: number; total: number } {
+  let done = 0;
+  let total = 0;
+  for (let i = 0; i < tasks.length; i++) {
+    const t = tasks[i];
+    if (t.text.trim() === '') continue;
+    if (getCountableDirectChildren(tasks, i).length > 0) continue;
+    total++;
+    if (t.status === 'done') done++;
+  }
+  return { done, total };
 }
 
 /** 親タスクの status を直下小タスクの完了状況に同期 */
@@ -707,48 +733,6 @@ function emptyTask(goalId: string | null): DailyTask {
   };
 }
 
-/**
- * その他タブの未完了タスクを翌日へ引き継ぐ。
- * 完了済み・空テキストは除外し、階層は残った祖先に合わせて詰め直す。
- */
-function carryIncompleteOtherTasks(previousLog: DailyLog | undefined): DailyTask[] {
-  const otherTasks = (previousLog?.tasks ?? []).filter(isOtherTask);
-  if (otherTasks.length === 0) return [emptyTask(OTHER_TAB)];
-
-  type Frame = { oldIndent: number; newIndent: number | null };
-  const stack: Frame[] = [];
-  const carried: DailyTask[] = [];
-
-  for (const task of otherTasks) {
-    while (stack.length > 0 && stack[stack.length - 1].oldIndent >= task.indentLevel) {
-      stack.pop();
-    }
-
-    const shouldCarry = task.status !== 'done' && task.text.trim() !== '';
-    if (shouldCarry) {
-      let newIndent = 0;
-      for (let i = stack.length - 1; i >= 0; i--) {
-        if (stack[i].newIndent !== null) {
-          newIndent = (stack[i].newIndent as number) + 1;
-          break;
-        }
-      }
-      carried.push({
-        id: generateId(),
-        text: task.text,
-        status: task.status === 'doing' ? 'doing' : 'todo',
-        indentLevel: Math.min(5, newIndent),
-        goalId: OTHER_TAB,
-      });
-      stack.push({ oldIndent: task.indentLevel, newIndent });
-    } else {
-      stack.push({ oldIndent: task.indentLevel, newIndent: null });
-    }
-  }
-
-  return carried.length > 0 ? carried : [emptyTask(OTHER_TAB)];
-}
-
 function TabRemainingBadge({ count }: { count: number }) {
   if (count <= 0) return null;
   return (
@@ -765,11 +749,49 @@ function TabRemainingBadge({ count }: { count: number }) {
   );
 }
 
+function getTasksForBlock(allTasks: DailyTask[], blockId: BlockId): DailyTask[] {
+  if (blockId === ROUTINE_TAB) return allTasks.filter(isRoutineTask);
+  return allTasks.filter((t) => t.goalId === blockId);
+}
+
+function mergeBlockIntoAll(
+  allTasks: DailyTask[],
+  blockId: BlockId,
+  newVisible: DailyTask[]
+): DailyTask[] {
+  if (blockId === ROUTINE_TAB) {
+    const others = allTasks.filter((t) => !isRoutineTask(t));
+    return [...newVisible, ...others];
+  }
+  const others = allTasks.filter((t) => t.goalId !== blockId);
+  return [...others, ...newVisible];
+}
+
+function goalIdForBlock(blockId: BlockId): string | null {
+  return blockId === ROUTINE_TAB ? null : blockId;
+}
+
+const WEEKDAY_LABELS = ['日', '月', '火', '水', '木', '金', '土'] as const;
+
+const FREQUENCY_OPTIONS: { value: RoutineFrequency; label: string }[] = [
+  { value: 'daily', label: '毎日' },
+  { value: 'weekly', label: '毎週' },
+  { value: 'monthly', label: '毎月' },
+  { value: 'custom', label: 'カスタマイズ' },
+  { value: 'off', label: 'OFF' },
+];
+
+function frequencySelectClass(frequency: RoutineFrequency): string {
+  if (frequency === 'off') return 'border-gray-200 bg-gray-50 text-gray-500';
+  if (frequency === 'custom') return 'border-amber-200 bg-amber-50 text-amber-800';
+  return 'border-blue-200 bg-blue-50 text-blue-700';
+}
+
 interface SortableRoutineItemProps {
   routine: RoutineTask;
   isMobile: boolean;
   onUpdateText: (id: string, text: string) => void;
-  onToggleEnabled: (id: string, enabled: boolean) => void;
+  onUpdateRoutine: (id: string, patch: Partial<RoutineTask>) => void;
   onDelete: (id: string) => void;
 }
 
@@ -777,10 +799,11 @@ function SortableRoutineItem({
   routine,
   isMobile,
   onUpdateText,
-  onToggleEnabled,
+  onUpdateRoutine,
   onDelete,
 }: SortableRoutineItemProps) {
-  const enabled = routine.enabled !== false;
+  const frequency = routine.frequency ?? 'daily';
+  const isOff = frequency === 'off';
   const {
     attributes,
     listeners,
@@ -801,71 +824,180 @@ function SortableRoutineItem({
   const dragListeners = isMobile ? listeners : undefined;
   const handleListeners = !isMobile ? listeners : undefined;
 
+  const selectedWeekDays = new Set(routine.weekDays ?? []);
+
   return (
     <div
       ref={setNodeRef}
       style={style}
       className={clsx(
-        'flex items-center gap-3 md:gap-4 bg-white p-4 rounded-xl shadow-sm border border-gray-100 group',
+        'flex flex-col gap-3 bg-white p-4 rounded-xl shadow-sm border border-gray-100 group',
         isDragging && 'shadow-md ring-2 ring-blue-100',
-        !enabled && 'opacity-70'
+        isOff && 'opacity-70'
       )}
       {...attributes}
       {...(dragListeners ?? {})}
     >
-      <div
-        {...(handleListeners ?? {})}
-        className="p-1 text-gray-300 hover:text-gray-600 cursor-grab active:cursor-grabbing flex-shrink-0"
-        aria-hidden="true"
-      >
-        <GripVertical size={20} />
+      <div className="flex items-center gap-3 md:gap-4">
+        <div
+          {...(handleListeners ?? {})}
+          className="p-1 text-gray-300 hover:text-gray-600 cursor-grab active:cursor-grabbing flex-shrink-0"
+          aria-hidden="true"
+        >
+          <GripVertical size={20} />
+        </div>
+
+        <select
+          value={frequency}
+          onChange={(e) => {
+            const next = e.target.value as RoutineFrequency;
+            const patch: Partial<RoutineTask> = { frequency: next };
+            if (next === 'weekly' && routine.weekDay == null) {
+              patch.weekDay = new Date().getDay();
+            }
+            if (next === 'monthly' && routine.monthDay == null) {
+              patch.monthDay = new Date().getDate();
+            }
+            if (next === 'custom' && (!routine.weekDays || routine.weekDays.length === 0)) {
+              patch.weekDays = [new Date().getDay()];
+            }
+            onUpdateRoutine(routine.id, patch);
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          aria-label={`${routine.text || 'ルーティンタスク'}の繰り返し頻度`}
+          className={clsx(
+            'flex-shrink-0 w-[7.5rem] px-2 py-1.5 rounded-lg border text-xs font-semibold',
+            'focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500',
+            frequencySelectClass(frequency)
+          )}
+        >
+          {FREQUENCY_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+
+        <div
+          className={clsx(
+            'w-2 h-10 rounded-full flex-shrink-0 transition-colors',
+            isOff ? 'bg-gray-200' : 'bg-blue-400'
+          )}
+          aria-hidden="true"
+        />
+
+        <input
+          value={routine.text}
+          onChange={(e) => onUpdateText(routine.id, e.target.value)}
+          onPointerDown={(e) => e.stopPropagation()}
+          placeholder="例: 朝の読書、スクワット20回..."
+          className={clsx(
+            'flex-1 min-w-0 text-xl font-medium outline-none border-none placeholder-gray-300',
+            isOff && 'text-gray-400'
+          )}
+        />
+
+        <button
+          type="button"
+          onClick={() => onDelete(routine.id)}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="p-2 text-gray-300 hover:text-red-500 transition-colors flex-shrink-0"
+          aria-label="削除"
+        >
+          <Trash2 size={20} />
+        </button>
       </div>
 
-      <select
-        value={enabled ? 'on' : 'off'}
-        onChange={(e) => onToggleEnabled(routine.id, e.target.value === 'on')}
-        onPointerDown={(e) => e.stopPropagation()}
-        aria-label={`${routine.text || 'ルーティンタスク'}の有効/無効`}
-        className={clsx(
-          'flex-shrink-0 w-[4.5rem] px-2 py-1.5 rounded-lg border text-xs font-semibold tabular-nums',
-          'focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500',
-          enabled
-            ? 'border-blue-200 bg-blue-50 text-blue-700'
-            : 'border-gray-200 bg-gray-50 text-gray-500'
-        )}
-      >
-        <option value="on">ON</option>
-        <option value="off">OFF</option>
-      </select>
+      {frequency === 'weekly' && (
+        <div
+          className="flex flex-wrap items-center gap-2 pl-9 md:pl-12"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <span className="text-xs text-gray-500 font-medium flex-shrink-0">曜日</span>
+          <div className="flex flex-wrap gap-1.5">
+            {WEEKDAY_LABELS.map((label, day) => {
+              const selected = (routine.weekDay ?? 0) === day;
+              return (
+                <button
+                  key={day}
+                  type="button"
+                  onClick={() => onUpdateRoutine(routine.id, { weekDay: day })}
+                  className={clsx(
+                    'w-8 h-8 rounded-lg text-xs font-semibold transition-colors',
+                    selected
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  )}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
-      <div
-        className={clsx(
-          'w-2 h-10 rounded-full flex-shrink-0 transition-colors',
-          enabled ? 'bg-blue-400' : 'bg-gray-200'
-        )}
-        aria-hidden="true"
-      />
+      {frequency === 'monthly' && (
+        <div
+          className="flex flex-wrap items-center gap-2 pl-9 md:pl-12"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <span className="text-xs text-gray-500 font-medium flex-shrink-0">日付</span>
+          <select
+            value={routine.monthDay ?? new Date().getDate()}
+            onChange={(e) =>
+              onUpdateRoutine(routine.id, { monthDay: Number(e.target.value) })
+            }
+            className="px-2 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+          >
+            {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+              <option key={d} value={d}>
+                {d}日
+              </option>
+            ))}
+          </select>
+          <span className="text-[11px] text-gray-400">
+            ※短い月は最終日に表示されます
+          </span>
+        </div>
+      )}
 
-      <input
-        value={routine.text}
-        onChange={(e) => onUpdateText(routine.id, e.target.value)}
-        onPointerDown={(e) => e.stopPropagation()}
-        placeholder="例: 朝の読書、スクワット20回..."
-        className={clsx(
-          'flex-1 min-w-0 text-xl font-medium outline-none border-none placeholder-gray-300',
-          !enabled && 'text-gray-400'
-        )}
-      />
-
-      <button
-        type="button"
-        onClick={() => onDelete(routine.id)}
-        onPointerDown={(e) => e.stopPropagation()}
-        className="p-2 text-gray-300 hover:text-red-500 transition-colors flex-shrink-0"
-        aria-label="削除"
-      >
-        <Trash2 size={20} />
-      </button>
+      {frequency === 'custom' && (
+        <div
+          className="flex flex-wrap items-center gap-2 pl-9 md:pl-12"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <span className="text-xs text-gray-500 font-medium flex-shrink-0">曜日</span>
+          <div className="flex flex-wrap gap-1.5">
+            {WEEKDAY_LABELS.map((label, day) => {
+              const selected = selectedWeekDays.has(day);
+              return (
+                <button
+                  key={day}
+                  type="button"
+                  onClick={() => {
+                    const next = new Set(selectedWeekDays);
+                    if (selected) next.delete(day);
+                    else next.add(day);
+                    const weekDays = [...next].sort((a, b) => a - b);
+                    onUpdateRoutine(routine.id, {
+                      weekDays: weekDays.length > 0 ? weekDays : [day],
+                    });
+                  }}
+                  className={clsx(
+                    'w-8 h-8 rounded-lg text-xs font-semibold transition-colors',
+                    selected
+                      ? 'bg-amber-500 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  )}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -885,7 +1017,7 @@ export default function DailyTodoApp({
 
   const [allTasks, setAllTasks] = useState<DailyTask[]>([]);
   const [activeGoalIds, setActiveGoalIds] = useState<string[]>([]);
-  const [activeTab, setActiveTab] = useState<string>(ROUTINE_TAB);
+  const [collapsedBlocks, setCollapsedBlocks] = useState<Set<string>>(new Set());
   const [goalPickerOpen, setGoalPickerOpen] = useState(false);
   const [pendingGoalIds, setPendingGoalIds] = useState<Set<string>>(new Set());
   const [journalDrawerOpen, setJournalDrawerOpen] = useState(false);
@@ -898,6 +1030,8 @@ export default function DailyTodoApp({
     goalIds: string[];
   } | null>(null);
   const routineSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRefsById = useRef<Map<string, HTMLInputElement | HTMLTextAreaElement>>(new Map());
+  const isComposingRef = useRef(false);
 
   useEffect(() => {
     logsRef.current = logs;
@@ -944,6 +1078,10 @@ export default function DailyTodoApp({
         if (cancelled) return;
         setLogs(loadedLogs);
         setRoutineTasks(routines);
+        // 旧「その他」の未完了を Backlog へ移行（初回のみ）
+        void migrateOtherTasksToBacklog(loadedLogs).catch((e) =>
+          console.error('Backlog migration failed', e)
+        );
       } catch (e) {
         console.error(e);
       }
@@ -1039,27 +1177,35 @@ export default function DailyTodoApp({
             (id) => id !== OTHER_TAB && id !== ROUTINE_TAB
           );
           let tasks = log.tasks;
+          let changed = false;
 
-          if (!tasks.some((t) => isOtherTask(t))) {
-            tasks = [...tasks, emptyTask(OTHER_TAB)];
-            await persistLog(selectedDate, tasks, goalIds);
-            if (cancelled) return;
-            setActiveTab(ROUTINE_TAB);
-            setSelectedTaskIds(new Set());
-            setLastSelectedIndex(null);
-            return;
+          if (!tasks.some(isRoutineTask)) {
+            tasks = [...tasks, emptyTask(null)];
+            changed = true;
+          }
+          for (const gid of goalIds) {
+            if (!tasks.some((t) => t.goalId === gid)) {
+              tasks = [...tasks, emptyTask(gid)];
+              changed = true;
+            }
           }
 
-          setAllTasks(tasks);
-          setActiveGoalIds(goalIds);
-          setActiveTab(ROUTINE_TAB);
+          if (changed) {
+            await persistLog(selectedDate, tasks, goalIds);
+            if (cancelled) return;
+          } else {
+            setAllTasks(tasks);
+            setActiveGoalIds(goalIds);
+          }
         } else if (selectedDate === getLocalDate()) {
           const routines = await loadRoutineTasks();
           if (cancelled) return;
           const prev = findPreviousDailyLog(selectedDate, currentLogs);
           const carriedGoals = resolveInitialGoalIds(prev);
 
-          const activeRoutines = routines.filter((r) => r.enabled !== false);
+          const activeRoutines = routines.filter((r) =>
+            isRoutineActiveOnDate(r, new Date(selectedDate + 'T12:00:00'))
+          );
           const routineList: DailyTask[] =
             activeRoutines.length > 0
               ? activeRoutines.map((r) => ({
@@ -1072,20 +1218,13 @@ export default function DailyTodoApp({
               : [emptyTask(null)];
 
           const goalPlaceholderTasks = carriedGoals.map((gid) => emptyTask(gid));
-          const otherTasks = carryIncompleteOtherTasks(prev);
-          const initialTasks = [
-            ...routineList,
-            ...otherTasks,
-            ...goalPlaceholderTasks,
-          ];
+          const initialTasks = [...routineList, ...goalPlaceholderTasks];
 
           await persistLog(selectedDate, initialTasks, carriedGoals);
           if (cancelled) return;
-          setActiveTab(ROUTINE_TAB);
         } else {
-          setAllTasks([emptyTask(null), emptyTask(OTHER_TAB)]);
+          setAllTasks([emptyTask(null)]);
           setActiveGoalIds([]);
-          setActiveTab(ROUTINE_TAB);
         }
 
         setSelectedTaskIds(new Set());
@@ -1118,57 +1257,25 @@ export default function DailyTodoApp({
     return () => clearInterval(timer);
   }, [selectedDate]);
 
-  const inputRefs = useRef<(HTMLInputElement | HTMLTextAreaElement | null)[]>([]);
-  const isComposingRef = useRef(false);
-
-  const visibleTasks = useMemo(() => {
-    if (activeTab === ROUTINE_TAB) {
-      return allTasks.filter(isRoutineTask);
-    }
-    if (activeTab === OTHER_TAB) {
-      return allTasks.filter(isOtherTask);
-    }
-    return allTasks.filter((t) => t.goalId === activeTab);
-  }, [allTasks, activeTab]);
-
-  const remainingByTab = useMemo(() => {
-    const routine = countRemainingTasks(allTasks.filter(isRoutineTask));
-    const other = countRemainingTasks(allTasks.filter(isOtherTask));
-    const goals = new Map<string, number>();
-    for (const goalId of activeGoalIds) {
-      goals.set(
-        goalId,
-        countRemainingTasks(allTasks.filter((t) => t.goalId === goalId))
-      );
-    }
-    return { routine, other, goals };
-  }, [allTasks, activeGoalIds]);
-
-  const achievementRate = useMemo(
-    () => calcDailyAchievementRate(allTasks),
+  /** 達成率・コピー対象は「その他」を除外 */
+  const focusTasks = useMemo(
+    () => allTasks.filter((t) => !isOtherTask(t)),
     [allTasks]
   );
 
-  const mergeVisibleIntoAll = useCallback(
-    (newVisible: DailyTask[]) => {
-      if (activeTab === ROUTINE_TAB) {
-        const others = allTasks.filter((t) => !isRoutineTask(t));
-        return [...newVisible, ...others];
-      }
-      if (activeTab === OTHER_TAB) {
-        const others = allTasks.filter((t) => !isOtherTask(t));
-        return [...others, ...newVisible];
-      }
-      const others = allTasks.filter((t) => t.goalId !== activeTab);
-      return [...others, ...newVisible];
-    },
-    [activeTab, allTasks]
+  const blockIds = useMemo<BlockId[]>(
+    () => [ROUTINE_TAB, ...activeGoalIds],
+    [activeGoalIds]
   );
 
-  const updateVisibleAndSave = useCallback(
-    (newVisible: DailyTask[]) => {
-      const nextAll = mergeVisibleIntoAll(newVisible);
-      // 構造変更は即保存（デバウンス中のテキストもまとめて確定）
+  const achievementRate = useMemo(
+    () => calcDailyAchievementRate(focusTasks),
+    [focusTasks]
+  );
+
+  const updateBlockAndSave = useCallback(
+    (blockId: BlockId, newVisible: DailyTask[]) => {
+      const nextAll = mergeBlockIntoAll(allTasks, blockId, newVisible);
       pendingTextSaveRef.current = null;
       if (textSaveTimerRef.current) {
         clearTimeout(textSaveTimerRef.current);
@@ -1176,16 +1283,21 @@ export default function DailyTodoApp({
       }
       void persistLog(selectedDate, nextAll, activeGoalIds);
     },
-    [mergeVisibleIntoAll, activeGoalIds, selectedDate, persistLog]
+    [allTasks, activeGoalIds, selectedDate, persistLog]
   );
 
-  const toggleSelection = (id: string, shiftKey: boolean, index: number) => {
+  const focusTaskInput = useCallback((taskId: string | undefined) => {
+    if (!taskId) return;
+    setTimeout(() => inputRefsById.current.get(taskId)?.focus(), 0);
+  }, []);
+
+  const toggleSelection = (id: string, shiftKey: boolean, index: number, blockTasks: DailyTask[]) => {
     const newSelected = new Set(selectedTaskIds);
     if (shiftKey && lastSelectedIndex !== null) {
       const start = Math.min(lastSelectedIndex, index);
       const end = Math.max(lastSelectedIndex, index);
       for (let i = start; i <= end; i++) {
-        newSelected.add(visibleTasks[i].id);
+        newSelected.add(blockTasks[i].id);
       }
     } else {
       if (newSelected.has(id)) newSelected.delete(id);
@@ -1195,56 +1307,67 @@ export default function DailyTodoApp({
     setSelectedTaskIds(newSelected);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent, index: number) => {
+  const handleKeyDown = (
+    e: React.KeyboardEvent,
+    index: number,
+    blockId: BlockId,
+    blockTasks: DailyTask[]
+  ) => {
     if (isComposingRef.current) return;
-    const goalId = activeTab === ROUTINE_TAB ? null : activeTab;
+    const goalId = goalIdForBlock(blockId);
 
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (visibleTasks[index].text.trim() === '' && index === visibleTasks.length - 1) return;
+      if (blockTasks[index].text.trim() === '' && index === blockTasks.length - 1) return;
       const newTask: DailyTask = {
         id: generateId(),
         text: '',
         status: 'todo',
-        indentLevel: visibleTasks[index].indentLevel,
+        indentLevel: blockTasks[index].indentLevel,
         goalId,
       };
-      const newVisible = [...visibleTasks];
+      const newVisible = [...blockTasks];
       newVisible.splice(index + 1, 0, newTask);
-      updateVisibleAndSave(newVisible);
-      setTimeout(() => inputRefs.current[index + 1]?.focus(), 0);
+      updateBlockAndSave(blockId, newVisible);
+      focusTaskInput(newTask.id);
     } else if (e.key === 'Tab') {
       e.preventDefault();
       const newLevel = e.shiftKey
-        ? Math.max(0, visibleTasks[index].indentLevel - 1)
-        : Math.min(5, visibleTasks[index].indentLevel + 1);
-      const newVisible = [...visibleTasks];
+        ? Math.max(0, blockTasks[index].indentLevel - 1)
+        : Math.min(5, blockTasks[index].indentLevel + 1);
+      const newVisible = [...blockTasks];
       newVisible[index] = { ...newVisible[index], indentLevel: newLevel };
-      updateVisibleAndSave(syncParentStatuses(newVisible));
+      updateBlockAndSave(blockId, syncParentStatuses(newVisible));
     } else if (e.key === 'Backspace') {
-      if (visibleTasks[index].text === '' && visibleTasks.length > 1) {
+      if (blockTasks[index].text === '' && blockTasks.length > 1) {
         e.preventDefault();
-        const newVisible = visibleTasks.filter((_, i) => i !== index);
-        updateVisibleAndSave(syncParentStatuses(newVisible));
-        setTimeout(() => inputRefs.current[Math.max(0, index - 1)]?.focus(), 0);
+        const prevId = blockTasks[Math.max(0, index - 1)]?.id;
+        const newVisible = blockTasks.filter((_, i) => i !== index);
+        updateBlockAndSave(blockId, syncParentStatuses(newVisible));
+        focusTaskInput(prevId);
       }
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      if (index > 0) inputRefs.current[index - 1]?.focus();
+      if (index > 0) focusTaskInput(blockTasks[index - 1]?.id);
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
-      if (index < visibleTasks.length - 1) inputRefs.current[index + 1]?.focus();
+      if (index < blockTasks.length - 1) focusTaskInput(blockTasks[index + 1]?.id);
     }
   };
 
-  const handlePaste = (e: React.ClipboardEvent, index: number) => {
+  const handlePaste = (
+    e: React.ClipboardEvent,
+    index: number,
+    blockId: BlockId,
+    blockTasks: DailyTask[]
+  ) => {
     const pasteData = e.clipboardData.getData('text');
     const lines = pasteData.split(/\r?\n/).filter((line) => line.trim() !== '' || line === '');
     if (lines.length <= 1) return;
 
     e.preventDefault();
-    const goalId = activeTab === ROUTINE_TAB ? null : activeTab;
-    const newVisible = [...visibleTasks];
+    const goalId = goalIdForBlock(blockId);
+    const newVisible = [...blockTasks];
     const tasksToInsert: DailyTask[] = lines.map((line) => {
       const indentMatch = line.match(/^(\s+)/);
       const indentStr = indentMatch ? indentMatch[1] : '';
@@ -1263,36 +1386,35 @@ export default function DailyTodoApp({
       };
     });
 
-    if (visibleTasks[index].text.trim() === '') {
+    if (blockTasks[index].text.trim() === '') {
       newVisible.splice(index, 1, ...tasksToInsert);
     } else {
       newVisible.splice(index + 1, 0, ...tasksToInsert);
     }
-    updateVisibleAndSave(newVisible);
+    updateBlockAndSave(blockId, newVisible);
   };
 
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = (event: DragEndEvent, blockId: BlockId, blockTasks: DailyTask[]) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const oldIndex = visibleTasks.findIndex((t) => t.id === active.id);
-    const newIndex = visibleTasks.findIndex((t) => t.id === over.id);
+    const oldIndex = blockTasks.findIndex((t) => t.id === active.id);
+    const newIndex = blockTasks.findIndex((t) => t.id === over.id);
     if (oldIndex === -1 || newIndex === -1) return;
-    updateVisibleAndSave(arrayMove(visibleTasks, oldIndex, newIndex));
+    updateBlockAndSave(blockId, arrayMove(blockTasks, oldIndex, newIndex));
   };
 
-  const toggleStatus = (index: number) => {
-    const current = visibleTasks[index].status;
+  const toggleStatus = (index: number, blockId: BlockId, blockTasks: DailyTask[]) => {
+    const current = blockTasks[index].status;
     const next = current === 'todo' ? 'doing' : current === 'doing' ? 'done' : 'todo';
-    const newVisible = [...visibleTasks];
+    const newVisible = [...blockTasks];
     newVisible[index] = { ...newVisible[index], status: next };
-    updateVisibleAndSave(syncParentStatuses(newVisible));
+    updateBlockAndSave(blockId, syncParentStatuses(newVisible));
   };
 
-  const updateText = (index: number, text: string) => {
-    const newVisible = [...visibleTasks];
+  const updateText = (index: number, text: string, blockId: BlockId, blockTasks: DailyTask[]) => {
+    const newVisible = [...blockTasks];
     newVisible[index] = { ...newVisible[index], text };
-    const nextAll = mergeVisibleIntoAll(newVisible);
-    // UI は即反映、クラウド保存はデバウンス
+    const nextAll = mergeBlockIntoAll(allTasks, blockId, newVisible);
     setAllTasks(nextAll);
     const existing = logsRef.current.find((l) => l.date === selectedDate);
     const nextLog: DailyLog = {
@@ -1309,25 +1431,25 @@ export default function DailyTodoApp({
   };
 
   const changeIndent = useCallback(
-    (index: number, delta: -1 | 1) => {
-      const current = visibleTasks[index];
+    (index: number, delta: -1 | 1, blockId: BlockId, blockTasks: DailyTask[]) => {
+      const current = blockTasks[index];
       if (!current) return;
-      const previousIndent = visibleTasks[index - 1]?.indentLevel ?? -1;
+      const previousIndent = blockTasks[index - 1]?.indentLevel ?? -1;
       const maxIndent = delta > 0 ? Math.min(5, previousIndent + 1) : 5;
       const newLevel = Math.min(maxIndent, Math.max(0, current.indentLevel + delta));
       if (newLevel === current.indentLevel) return;
-      const newVisible = [...visibleTasks];
+      const newVisible = [...blockTasks];
       newVisible[index] = { ...newVisible[index], indentLevel: newLevel };
-      updateVisibleAndSave(syncParentStatuses(newVisible));
+      updateBlockAndSave(blockId, syncParentStatuses(newVisible));
     },
-    [visibleTasks, updateVisibleAndSave]
+    [updateBlockAndSave]
   );
 
   const copyToClipboard = () => {
     const tasksToCopy =
       selectedTaskIds.size > 0
-        ? visibleTasks.filter((t) => selectedTaskIds.has(t.id))
-        : visibleTasks;
+        ? focusTasks.filter((t) => selectedTaskIds.has(t.id))
+        : focusTasks;
     const text = tasksToCopy
       .map((task) => `${'\t'.repeat(task.indentLevel)}${task.text}`)
       .join('\n');
@@ -1337,34 +1459,24 @@ export default function DailyTodoApp({
     });
   };
 
-  const ensureVisibleHasTask = (tabId: string, tasks: DailyTask[], goalIds: string[]) => {
-    const filtered =
-      tabId === ROUTINE_TAB
-        ? tasks.filter(isRoutineTask)
-        : tabId === OTHER_TAB
-          ? tasks.filter(isOtherTask)
-          : tasks.filter((t) => t.goalId === tabId);
-    if (filtered.length > 0) return;
-    const gid = tabId === ROUTINE_TAB ? null : tabId;
-    void persistLog(selectedDate, [...tasks, emptyTask(gid)], goalIds);
+  const toggleBlockCollapsed = (blockId: BlockId) => {
+    setCollapsedBlocks((prev) => {
+      const next = new Set(prev);
+      if (next.has(blockId)) next.delete(blockId);
+      else next.add(blockId);
+      return next;
+    });
   };
 
-  const handleSelectTab = (tabId: string) => {
-    setActiveTab(tabId);
-    setSelectedTaskIds(new Set());
-    setLastSelectedIndex(null);
-    ensureVisibleHasTask(tabId, allTasks, activeGoalIds);
-  };
-
-  const handleRemoveGoalTab = (goalId: string) => {
+  const handleRemoveGoalBlock = (goalId: string) => {
     const nextGoals = activeGoalIds.filter((id) => id !== goalId);
     const nextTasks = allTasks.filter((t) => t.goalId !== goalId);
+    const hasRoutineOrGoals = nextTasks.some((t) => !isOtherTask(t));
     void persistLog(
       selectedDate,
-      nextTasks.length > 0 ? nextTasks : [emptyTask(null), emptyTask(OTHER_TAB)],
+      hasRoutineOrGoals ? nextTasks : [emptyTask(null)],
       nextGoals
     );
-    if (activeTab === goalId) setActiveTab(ROUTINE_TAB);
   };
 
   const openGoalPicker = () => {
@@ -1381,12 +1493,27 @@ export default function DailyTodoApp({
     const nextGoals = [...activeGoalIds, ...toAdd];
     const placeholders = toAdd.map((gid) => emptyTask(gid));
     void persistLog(selectedDate, [...allTasks, ...placeholders], nextGoals);
-    setActiveTab(toAdd[0]);
+    setCollapsedBlocks((prev) => {
+      const next = new Set(prev);
+      toAdd.forEach((id) => next.delete(id));
+      return next;
+    });
     setGoalPickerOpen(false);
   };
 
   const addRoutine = () => {
-    const newRoutines = [...routineTasks, { id: generateId(), text: '', enabled: true }];
+    const today = new Date();
+    const newRoutines = [
+      ...routineTasks,
+      {
+        id: generateId(),
+        text: '',
+        frequency: 'daily' as const,
+        weekDay: today.getDay(),
+        monthDay: today.getDate(),
+        weekDays: [today.getDay()],
+      },
+    ];
     setRoutineTasks(newRoutines);
     void saveRoutineTasks(newRoutines);
   };
@@ -1400,9 +1527,9 @@ export default function DailyTodoApp({
     }, TEXT_SAVE_DEBOUNCE_MS);
   };
 
-  const toggleRoutineEnabled = (id: string, enabled: boolean) => {
+  const patchRoutine = (id: string, patch: Partial<RoutineTask>) => {
     const newRoutines = routineTasks.map((r) =>
-      r.id === id ? { ...r, enabled } : r
+      r.id === id ? { ...r, ...patch } : r
     );
     setRoutineTasks(newRoutines);
     void saveRoutineTasks(newRoutines);
@@ -1679,115 +1806,156 @@ export default function DailyTodoApp({
               </div>
             )}
 
-            {/* Goal tabs */}
-            <div className="px-3 md:px-10 pt-3 md:pt-4 flex items-center gap-1 border-b border-gray-100 overflow-x-auto flex-shrink-0">
+            {/* 目標追加バー + ブロック一覧 */}
+            <div className="px-3 md:px-10 pt-3 md:pt-4 flex items-center gap-2 flex-shrink-0">
+              <div className="flex-1 min-w-0 rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm md:text-base text-gray-400 truncate">
+                ロードマップのノードから目標を追加
+              </div>
               <button
-                onClick={() => handleSelectTab(ROUTINE_TAB)}
-                className={clsx(
-                  'px-3 md:px-4 py-2 md:py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors whitespace-nowrap inline-flex items-center gap-1.5',
-                  activeTab === ROUTINE_TAB
-                    ? 'border-blue-600 text-blue-700 bg-blue-50/50'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
-                )}
-              >
-                <TabRemainingBadge count={remainingByTab.routine} />
-                ルーティン
-              </button>
-
-              <button
-                onClick={() => handleSelectTab(OTHER_TAB)}
-                className={clsx(
-                  'px-3 md:px-4 py-2 md:py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors whitespace-nowrap inline-flex items-center gap-1.5',
-                  activeTab === OTHER_TAB
-                    ? 'border-blue-600 text-blue-700 bg-blue-50/50'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
-                )}
-              >
-                <TabRemainingBadge count={remainingByTab.other} />
-                その他
-              </button>
-
-              {activeGoalIds.map((goalId) => (
-                <div
-                  key={goalId}
-                  className={clsx(
-                    'group relative flex items-center gap-1 px-3 md:px-4 py-2 md:py-2.5 text-sm font-medium rounded-t-lg border-b-2 transition-colors whitespace-nowrap',
-                    activeTab === goalId
-                      ? 'border-blue-600 text-blue-700 bg-blue-50/50'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
-                  )}
-                >
-                  <button
-                    onClick={() => handleSelectTab(goalId)}
-                    className="max-w-[160px] inline-flex items-center gap-1.5 min-w-0"
-                  >
-                    <TabRemainingBadge count={remainingByTab.goals.get(goalId) ?? 0} />
-                    <span className="truncate">{goalTitleMap.get(goalId) || '目標'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    title="タブを削除"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleRemoveGoalTab(goalId);
-                    }}
-                    className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-red-50 text-gray-400 hover:text-red-500 transition-all"
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              ))}
-
-              <button
+                type="button"
                 onClick={openGoalPicker}
                 title="目標を追加"
-                className="ml-auto mb-1 p-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium flex-shrink-0"
               >
                 <Plus size={18} />
+                <span className="hidden sm:inline">目標を追加</span>
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 md:p-10 pt-4 md:pt-8 flex flex-col items-center min-h-0">
-              {visibleTasks.length === 0 ? (
-                <div className="text-gray-400 py-20">タスクがありません</div>
-              ) : (
-                <div className="max-w-6xl w-full pb-8 md:pb-32 overflow-visible">
-                  <DndContext
-                    sensors={sensors}
-                    collisionDetection={closestCenter}
-                    onDragEnd={handleDragEnd}
-                  >
-                    <SortableContext
-                      items={visibleTasks.map((t) => t.id)}
-                      strategy={verticalListSortingStrategy}
+            <div className="flex-1 overflow-y-auto p-4 md:p-10 pt-4 md:pt-6 flex flex-col items-center min-h-0">
+              <div className="max-w-6xl w-full space-y-4 pb-8 md:pb-32">
+                {blockIds.map((blockId) => {
+                  const blockTasks = getTasksForBlock(allTasks, blockId);
+                  const collapsed = collapsedBlocks.has(blockId);
+                  const progress = countBlockProgress(blockTasks);
+                  const remaining = countRemainingTasks(blockTasks);
+                  const title =
+                    blockId === ROUTINE_TAB
+                      ? 'ルーティン'
+                      : goalTitleMap.get(blockId) || '目標';
+                  const isGoal = blockId !== ROUTINE_TAB;
+
+                  return (
+                    <section
+                      key={blockId}
+                      className={clsx(
+                        'rounded-2xl border bg-white overflow-hidden transition-colors',
+                        'border-gray-200 border-l-4',
+                        isGoal ? 'border-l-blue-500' : 'border-l-blue-300'
+                      )}
                     >
-                      {visibleTasks.map((task, index) => (
-                        <SortableTaskItem
-                          key={task.id}
-                          task={task}
-                          index={index}
-                          visibleTasks={visibleTasks}
-                          isSelected={selectedTaskIds.has(task.id)}
-                          isMobile={isMobile}
-                          toggleSelection={toggleSelection}
-                          toggleStatus={toggleStatus}
-                          updateText={updateText}
-                          changeIndent={changeIndent}
-                          handleKeyDown={handleKeyDown}
-                          handlePaste={handlePaste}
-                          onTextBlur={() => {
-                            void flushTextSave();
-                          }}
-                          inputRef={(el) => {
-                            inputRefs.current[index] = el;
-                          }}
-                          isComposingRef={isComposingRef}
-                        />
-                      ))}
-                    </SortableContext>
-                  </DndContext>
-                </div>
-              )}
+                      <div className="flex items-center gap-2 px-3 md:px-4 py-3 bg-gray-50/80 border-b border-gray-100">
+                        <button
+                          type="button"
+                          onClick={() => toggleBlockCollapsed(blockId)}
+                          className="p-1 rounded-md text-gray-500 hover:bg-gray-200/80 transition-colors flex-shrink-0"
+                          aria-expanded={!collapsed}
+                          aria-label={collapsed ? '展開' : '折りたたむ'}
+                        >
+                          {collapsed ? <ChevronRight size={18} /> : <ChevronDown size={18} />}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => toggleBlockCollapsed(blockId)}
+                          className="flex-1 min-w-0 text-left flex items-center gap-2"
+                        >
+                          <TabRemainingBadge count={remaining} />
+                          <span className="font-bold text-gray-800 truncate text-sm md:text-base">
+                            {title}
+                          </span>
+                        </button>
+
+                        <span className="text-xs md:text-sm tabular-nums text-gray-500 font-medium flex-shrink-0">
+                          {progress.done} / {progress.total}
+                        </span>
+
+                        {isGoal && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveGoalBlock(blockId)}
+                            className="text-xs md:text-sm text-gray-400 hover:text-red-500 px-2 py-1 rounded-md hover:bg-red-50 transition-colors flex-shrink-0"
+                          >
+                            削除
+                          </button>
+                        )}
+                      </div>
+
+                      {!collapsed && (
+                        <div className="p-2 md:p-4">
+                          {blockTasks.length === 0 ? (
+                            <p className="text-gray-400 text-sm py-6 text-center">
+                              この目標のTodoはまだありません。
+                            </p>
+                          ) : (
+                            <DndContext
+                              sensors={sensors}
+                              collisionDetection={closestCenter}
+                              onDragEnd={(event) => handleDragEnd(event, blockId, blockTasks)}
+                            >
+                              <SortableContext
+                                items={blockTasks.map((t) => t.id)}
+                                strategy={verticalListSortingStrategy}
+                              >
+                                {blockTasks.map((task, index) => (
+                                  <SortableTaskItem
+                                    key={task.id}
+                                    task={task}
+                                    index={index}
+                                    visibleTasks={blockTasks}
+                                    isSelected={selectedTaskIds.has(task.id)}
+                                    isMobile={isMobile}
+                                    toggleSelection={(id, shiftKey, idx) =>
+                                      toggleSelection(id, shiftKey, idx, blockTasks)
+                                    }
+                                    toggleStatus={(idx) => toggleStatus(idx, blockId, blockTasks)}
+                                    updateText={(idx, text) =>
+                                      updateText(idx, text, blockId, blockTasks)
+                                    }
+                                    changeIndent={(idx, delta) =>
+                                      changeIndent(idx, delta, blockId, blockTasks)
+                                    }
+                                    handleKeyDown={(e, idx) =>
+                                      handleKeyDown(e, idx, blockId, blockTasks)
+                                    }
+                                    handlePaste={(e, idx) =>
+                                      handlePaste(e, idx, blockId, blockTasks)
+                                    }
+                                    onTextBlur={() => {
+                                      void flushTextSave();
+                                    }}
+                                    inputRef={(el) => {
+                                      if (el) inputRefsById.current.set(task.id, el);
+                                      else inputRefsById.current.delete(task.id);
+                                    }}
+                                    isComposingRef={isComposingRef}
+                                  />
+                                ))}
+                              </SortableContext>
+                            </DndContext>
+                          )}
+
+                          <div className="mt-2 flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const goalId = goalIdForBlock(blockId);
+                                const newTask = emptyTask(goalId);
+                                updateBlockAndSave(blockId, [...blockTasks, newTask]);
+                                focusTaskInput(newTask.id);
+                              }}
+                              className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 font-medium px-2 py-1.5 rounded-lg hover:bg-blue-50 transition-colors"
+                            >
+                              <Plus size={16} />
+                              Todoを追加
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </section>
+                  );
+                })}
+              </div>
             </div>
           </>
         ) : (
@@ -1804,7 +1972,7 @@ export default function DailyTodoApp({
                   <div>
                     <h1 className="text-2xl md:text-3xl font-bold text-gray-800">Routine Tasks</h1>
                     <p className="text-sm md:text-base text-gray-500">
-                      毎日自動的に追加されるタスクを設定します。OFFにしたタスクは翌日のToDoに反映されません。
+                      毎日・毎週・毎月・曜日指定で繰り返しを設定します。OFFにしたタスクはToDoに反映されません。
                     </p>
                   </div>
                 </div>
@@ -1843,7 +2011,7 @@ export default function DailyTodoApp({
                             routine={routine}
                             isMobile={isMobile}
                             onUpdateText={updateRoutine}
-                            onToggleEnabled={toggleRoutineEnabled}
+                            onUpdateRoutine={patchRoutine}
                             onDelete={deleteRoutine}
                           />
                         ))}

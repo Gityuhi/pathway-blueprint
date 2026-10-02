@@ -1,8 +1,8 @@
 import clsx from 'clsx';
-import { Map, CalendarCheck, BarChart3, UserPlus, LogOut } from 'lucide-react';
+import { Map, CalendarCheck, BarChart3, UserPlus, Inbox, LogOut } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 
-export type AppTab = 'roadmap' | 'daily' | 'activity' | 'assign';
+export type AppTab = 'roadmap' | 'daily' | 'backlog' | 'activity' | 'assign';
 
 interface SidebarProps {
   activeTab: AppTab;
@@ -17,6 +17,7 @@ const NAV_ITEMS: {
 }[] = [
   { id: 'roadmap', label: 'Roadmaps', shortLabel: 'マップ', icon: Map },
   { id: 'daily', label: "Today's ToDo", shortLabel: 'Todo', icon: CalendarCheck },
+  { id: 'backlog', label: 'Backlog', shortLabel: 'Backlog', icon: Inbox },
   { id: 'activity', label: 'Activity', shortLabel: '記録', icon: BarChart3 },
   { id: 'assign', label: 'ロードマップアサイン', shortLabel: 'アサイン', icon: UserPlus },
 ];

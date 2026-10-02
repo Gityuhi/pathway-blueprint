@@ -24,8 +24,13 @@ create table if not exists public.daily_logs (
 create table if not exists public.user_settings (
   user_id uuid primary key references auth.users (id) on delete cascade,
   routine_tasks jsonb not null default '[]'::jsonb,
-  assigned_roadmap_id uuid
+  assigned_roadmap_id uuid,
+  backlog_tasks jsonb not null default '[]'::jsonb
 );
+
+-- 既存 DB 向け（初回 create 済みの場合）
+alter table public.user_settings
+  add column if not exists backlog_tasks jsonb not null default '[]'::jsonb;
 
 alter table public.roadmaps enable row level security;
 alter table public.daily_logs enable row level security;

@@ -42,14 +42,41 @@ export interface DailyTask {
   text: string;
   status: DailyTaskStatus;
   indentLevel: number;
-  /** null = ルーティンタブ, 'other' = その他タブ, それ以外 = ロードマップ目標 */
+  /** null = ルーティン, 'other' = 旧その他（互換用）, それ以外 = ロードマップ目標 */
   goalId?: string | null;
 }
+
+/** 日付に紐づかない持ち越しタスク（Backlog） */
+export type BacklogPriority = 'high' | 'medium' | 'low';
+
+export interface BacklogTask {
+  id: string;
+  text: string;
+  completed: boolean;
+  /** 高 / 中 / 低 */
+  priority: BacklogPriority;
+  createdAt: string;
+  completedAt?: string | null;
+}
+
+export type RoutineFrequency = 'daily' | 'weekly' | 'monthly' | 'custom' | 'off';
 
 export interface RoutineTask {
   id: string;
   text: string;
-  /** false のとき翌日のルーティンタブに反映しない（省略時は true） */
+  /**
+   * 繰り返し頻度。
+   * daily=毎日 / weekly=毎週（weekDay） / monthly=毎月（monthDay） /
+   * custom=指定曜日（weekDays） / off=無効
+   */
+  frequency: RoutineFrequency;
+  /** 毎週: 0=日 … 6=土（Date#getDay と同じ） */
+  weekDay?: number;
+  /** 毎月: 1–31 */
+  monthDay?: number;
+  /** カスタマイズ: 曜日配列（0=日 … 6=土） */
+  weekDays?: number[];
+  /** @deprecated frequency を優先。互換用 */
   enabled?: boolean;
 }
 
