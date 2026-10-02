@@ -771,6 +771,45 @@ function goalIdForBlock(blockId: BlockId): string | null {
   return blockId === ROUTINE_TAB ? null : blockId;
 }
 
+/** 目標ブロックの並べ替え用シェル（ルーティンは対象外） */
+function SortableGoalBlockShell({
+  id,
+  className,
+  children,
+}: {
+  id: string;
+  className?: string;
+  children: (opts: {
+    dragHandleProps: React.HTMLAttributes<HTMLElement>;
+    isDragging: boolean;
+  }) => React.ReactNode;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 20 : 0,
+    opacity: isDragging ? 0.85 : 1,
+  };
+
+  return (
+    <section ref={setNodeRef} style={style} className={className}>
+      {children({
+        dragHandleProps: { ...attributes, ...listeners },
+        isDragging,
+      })}
+    </section>
+  );
+}
+
 const WEEKDAY_LABELS = ['日', '月', '火', '水', '木', '金', '土'] as const;
 
 const FREQUENCY_OPTIONS: { value: RoutineFrequency; label: string }[] = [
@@ -1067,6 +1106,16 @@ export default function DailyTodoApp({
     })
   );
 
+  /** ブロック並べ替えはハンドル操作のみ想定のため短距離で発火 */
+  const blockSensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 6 },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -1261,11 +1310,6 @@ export default function DailyTodoApp({
   const focusTasks = useMemo(
     () => allTasks.filter((t) => !isOtherTask(t)),
     [allTasks]
-  );
-
-  const blockIds = useMemo<BlockId[]>(
-    () => [ROUTINE_TAB, ...activeGoalIds],
-    [activeGoalIds]
   );
 
   const achievementRate = useMemo(
@@ -1477,6 +1521,16 @@ export default function DailyTodoApp({
       hasRoutineOrGoals ? nextTasks : [emptyTask(null)],
       nextGoals
     );
+  };
+
+  const handleGoalBlockDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIndex = activeGoalIds.findIndex((id) => id === active.id);
+    const newIndex = activeGoalIds.findIndex((id) => id === over.id);
+    if (oldIndex === -1 || newIndex === -1) return;
+    const nextGoals = arrayMove(activeGoalIds, oldIndex, newIndex);
+    void persistLog(selectedDate, allTasks, nextGoals);
   };
 
   const openGoalPicker = () => {
@@ -1824,27 +1878,118 @@ export default function DailyTodoApp({
 
             <div className="flex-1 overflow-y-auto p-4 md:p-10 pt-4 md:pt-6 flex flex-col items-center min-h-0">
               <div className="max-w-6xl w-full space-y-4 pb-8 md:pb-32">
-                {blockIds.map((blockId) => {
-                  const blockTasks = getTasksForBlock(allTasks, blockId);
-                  const collapsed = collapsedBlocks.has(blockId);
-                  const progress = countBlockProgress(blockTasks);
-                  const remaining = countRemainingTasks(blockTasks);
-                  const title =
-                    blockId === ROUTINE_TAB
-                      ? 'ルーティン'
-                      : goalTitleMap.get(blockId) || '目標';
-                  const isGoal = blockId !== ROUTINE_TAB;
+                {(() => {
+                  const renderBlockBody = (blockId: BlockId) => {
+                    const blockTasks = getTasksForBlock(allTasks, blockId);
+                    return (
+                      <>
+                        {blockTasks.length === 0 ? (
+                          <p className="text-gray-400 text-sm py-6 text-center">
+                            この目標のTodoはまだありません。
+                          </p>
+                        ) : (
+                          <DndContext
+                            sensors={sensors}
+                            collisionDetection={closestCenter}
+                            onDragEnd={(event) => handleDragEnd(event, blockId, blockTasks)}
+                          >
+                            <SortableContext
+                              items={blockTasks.map((t) => t.id)}
+                              strategy={verticalListSortingStrategy}
+                            >
+                              {blockTasks.map((task, index) => (
+                                <SortableTaskItem
+                                  key={task.id}
+                                  task={task}
+                                  index={index}
+                                  visibleTasks={blockTasks}
+                                  isSelected={selectedTaskIds.has(task.id)}
+                                  isMobile={isMobile}
+                                  toggleSelection={(id, shiftKey, idx) =>
+                                    toggleSelection(id, shiftKey, idx, blockTasks)
+                                  }
+                                  toggleStatus={(idx) => toggleStatus(idx, blockId, blockTasks)}
+                                  updateText={(idx, text) =>
+                                    updateText(idx, text, blockId, blockTasks)
+                                  }
+                                  changeIndent={(idx, delta) =>
+                                    changeIndent(idx, delta, blockId, blockTasks)
+                                  }
+                                  handleKeyDown={(e, idx) =>
+                                    handleKeyDown(e, idx, blockId, blockTasks)
+                                  }
+                                  handlePaste={(e, idx) =>
+                                    handlePaste(e, idx, blockId, blockTasks)
+                                  }
+                                  onTextBlur={() => {
+                                    void flushTextSave();
+                                  }}
+                                  inputRef={(el) => {
+                                    if (el) inputRefsById.current.set(task.id, el);
+                                    else inputRefsById.current.delete(task.id);
+                                  }}
+                                  isComposingRef={isComposingRef}
+                                />
+                              ))}
+                            </SortableContext>
+                          </DndContext>
+                        )}
 
-                  return (
-                    <section
-                      key={blockId}
-                      className={clsx(
-                        'rounded-2xl border bg-white overflow-hidden transition-colors',
-                        'border-gray-200 border-l-4',
-                        isGoal ? 'border-l-blue-500' : 'border-l-blue-300'
-                      )}
-                    >
-                      <div className="flex items-center gap-2 px-3 md:px-4 py-3 bg-gray-50/80 border-b border-gray-100">
+                        <div className="mt-2 flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const goalId = goalIdForBlock(blockId);
+                              const newTask = emptyTask(goalId);
+                              updateBlockAndSave(blockId, [...blockTasks, newTask]);
+                              focusTaskInput(newTask.id);
+                            }}
+                            className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 font-medium px-2 py-1.5 rounded-lg hover:bg-blue-50 transition-colors"
+                          >
+                            <Plus size={16} />
+                            Todoを追加
+                          </button>
+                        </div>
+                      </>
+                    );
+                  };
+
+                  const renderBlockHeader = (
+                    blockId: BlockId,
+                    opts?: {
+                      dragHandleProps?: React.HTMLAttributes<HTMLElement>;
+                      isDragging?: boolean;
+                    }
+                  ) => {
+                    const blockTasks = getTasksForBlock(allTasks, blockId);
+                    const collapsed = collapsedBlocks.has(blockId);
+                    const progress = countBlockProgress(blockTasks);
+                    const remaining = countRemainingTasks(blockTasks);
+                    const title =
+                      blockId === ROUTINE_TAB
+                        ? 'ルーティン'
+                        : goalTitleMap.get(blockId) || '目標';
+                    const isGoal = blockId !== ROUTINE_TAB;
+
+                    return (
+                      <div
+                        className={clsx(
+                          'flex items-center gap-2 px-3 md:px-4 py-3 bg-gray-50/80 border-b border-gray-100',
+                          opts?.isDragging && 'bg-blue-50/80'
+                        )}
+                      >
+                        {isGoal && opts?.dragHandleProps && (
+                          <button
+                            type="button"
+                            {...opts.dragHandleProps}
+                            className="p-1 rounded-md text-gray-300 hover:text-gray-600 cursor-grab active:cursor-grabbing flex-shrink-0 touch-none"
+                            aria-label="ブロックを並べ替え"
+                            onClick={(e) => e.preventDefault()}
+                          >
+                            <GripVertical size={18} />
+                          </button>
+                        )}
+
                         <button
                           type="button"
                           onClick={() => toggleBlockCollapsed(blockId)}
@@ -1880,81 +2025,68 @@ export default function DailyTodoApp({
                           </button>
                         )}
                       </div>
+                    );
+                  };
 
-                      {!collapsed && (
-                        <div className="p-2 md:p-4">
-                          {blockTasks.length === 0 ? (
-                            <p className="text-gray-400 text-sm py-6 text-center">
-                              この目標のTodoはまだありません。
-                            </p>
-                          ) : (
-                            <DndContext
-                              sensors={sensors}
-                              collisionDetection={closestCenter}
-                              onDragEnd={(event) => handleDragEnd(event, blockId, blockTasks)}
-                            >
-                              <SortableContext
-                                items={blockTasks.map((t) => t.id)}
-                                strategy={verticalListSortingStrategy}
-                              >
-                                {blockTasks.map((task, index) => (
-                                  <SortableTaskItem
-                                    key={task.id}
-                                    task={task}
-                                    index={index}
-                                    visibleTasks={blockTasks}
-                                    isSelected={selectedTaskIds.has(task.id)}
-                                    isMobile={isMobile}
-                                    toggleSelection={(id, shiftKey, idx) =>
-                                      toggleSelection(id, shiftKey, idx, blockTasks)
-                                    }
-                                    toggleStatus={(idx) => toggleStatus(idx, blockId, blockTasks)}
-                                    updateText={(idx, text) =>
-                                      updateText(idx, text, blockId, blockTasks)
-                                    }
-                                    changeIndent={(idx, delta) =>
-                                      changeIndent(idx, delta, blockId, blockTasks)
-                                    }
-                                    handleKeyDown={(e, idx) =>
-                                      handleKeyDown(e, idx, blockId, blockTasks)
-                                    }
-                                    handlePaste={(e, idx) =>
-                                      handlePaste(e, idx, blockId, blockTasks)
-                                    }
-                                    onTextBlur={() => {
-                                      void flushTextSave();
-                                    }}
-                                    inputRef={(el) => {
-                                      if (el) inputRefsById.current.set(task.id, el);
-                                      else inputRefsById.current.delete(task.id);
-                                    }}
-                                    isComposingRef={isComposingRef}
-                                  />
-                                ))}
-                              </SortableContext>
-                            </DndContext>
-                          )}
+                  const routineCollapsed = collapsedBlocks.has(ROUTINE_TAB);
 
-                          <div className="mt-2 flex justify-end">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const goalId = goalIdForBlock(blockId);
-                                const newTask = emptyTask(goalId);
-                                updateBlockAndSave(blockId, [...blockTasks, newTask]);
-                                focusTaskInput(newTask.id);
-                              }}
-                              className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 font-medium px-2 py-1.5 rounded-lg hover:bg-blue-50 transition-colors"
-                            >
-                              <Plus size={16} />
-                              Todoを追加
-                            </button>
+                  return (
+                    <>
+                      <section
+                        className={clsx(
+                          'rounded-2xl border bg-white overflow-hidden transition-colors',
+                          'border-gray-200 border-l-4 border-l-blue-300'
+                        )}
+                      >
+                        {renderBlockHeader(ROUTINE_TAB)}
+                        {!routineCollapsed && (
+                          <div className="p-2 md:p-4">{renderBlockBody(ROUTINE_TAB)}</div>
+                        )}
+                      </section>
+
+                      <DndContext
+                        sensors={blockSensors}
+                        collisionDetection={closestCenter}
+                        onDragEnd={handleGoalBlockDragEnd}
+                      >
+                        <SortableContext
+                          items={activeGoalIds}
+                          strategy={verticalListSortingStrategy}
+                        >
+                          <div className="space-y-4">
+                            {activeGoalIds.map((goalId) => {
+                              const collapsed = collapsedBlocks.has(goalId);
+                              return (
+                                <SortableGoalBlockShell
+                                  key={goalId}
+                                  id={goalId}
+                                  className={clsx(
+                                    'rounded-2xl border bg-white overflow-hidden transition-colors',
+                                    'border-gray-200 border-l-4 border-l-blue-500'
+                                  )}
+                                >
+                                  {({ dragHandleProps, isDragging }) => (
+                                    <>
+                                      {renderBlockHeader(goalId, {
+                                        dragHandleProps,
+                                        isDragging,
+                                      })}
+                                      {!collapsed && (
+                                        <div className="p-2 md:p-4">
+                                          {renderBlockBody(goalId)}
+                                        </div>
+                                      )}
+                                    </>
+                                  )}
+                                </SortableGoalBlockShell>
+                              );
+                            })}
                           </div>
-                        </div>
-                      )}
-                    </section>
+                        </SortableContext>
+                      </DndContext>
+                    </>
                   );
-                })}
+                })()}
               </div>
             </div>
           </>
