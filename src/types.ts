@@ -42,7 +42,7 @@ export interface DailyTask {
   text: string;
   status: DailyTaskStatus;
   indentLevel: number;
-  /** null = ルーティン, 'other' = 旧その他（互換用）, それ以外 = ロードマップ目標 */
+  /** null = ルーティン, 'spot' = 例外, 'other' = 旧その他（互換用）, それ以外 = ロードマップ目標 */
   goalId?: string | null;
 }
 

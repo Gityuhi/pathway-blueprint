@@ -57,10 +57,14 @@ import type {
 } from '../types';
 
 const ROUTINE_TAB = 'routine' as const;
+/** 今日限りの例外タスク（最下部固定・繰り越しなし） */
+const SPOT_TAB = 'spot' as const;
 /** 旧「その他」タブ（履歴互換用。新規作成はしない） */
 const OTHER_TAB = 'other' as const;
 
-type BlockId = typeof ROUTINE_TAB | string;
+type BlockId = typeof ROUTINE_TAB | typeof SPOT_TAB | string;
+
+const FIXED_BLOCK_IDS = new Set<string>([ROUTINE_TAB, SPOT_TAB, OTHER_TAB]);
 
 const SWIPE_THRESHOLD = 56;
 const MAX_SWIPE_DX = 72;
@@ -710,13 +714,15 @@ function buildGoalTree(roadmap: Roadmap | undefined): GoalOption[] {
 
 /** 新規日の目標タブ: 前日分を引き継ぐ（ロードマップ目標のみ） */
 function resolveInitialGoalIds(previousLog: DailyLog | undefined): string[] {
-  return (previousLog?.activeGoalIds ?? []).filter(
-    (id) => id !== OTHER_TAB && id !== ROUTINE_TAB
-  );
+  return (previousLog?.activeGoalIds ?? []).filter((id) => !FIXED_BLOCK_IDS.has(id));
 }
 
 function isRoutineTask(task: DailyTask) {
   return task.goalId == null;
+}
+
+function isSpotTask(task: DailyTask) {
+  return task.goalId === SPOT_TAB;
 }
 
 function isOtherTask(task: DailyTask) {
@@ -731,6 +737,18 @@ function emptyTask(goalId: string | null): DailyTask {
     indentLevel: 0,
     goalId,
   };
+}
+
+function blockTitle(blockId: BlockId, goalTitleMap: Map<string, string>): string {
+  if (blockId === ROUTINE_TAB) return 'ルーティン';
+  if (blockId === SPOT_TAB) return '例外';
+  return goalTitleMap.get(blockId) || '目標';
+}
+
+function blockEmptyMessage(blockId: BlockId): string {
+  if (blockId === ROUTINE_TAB) return 'ルーティンのTodoはまだありません。';
+  if (blockId === SPOT_TAB) return '例外のタスクはまだありません。';
+  return 'この目標のTodoはまだありません。';
 }
 
 function TabRemainingBadge({ count }: { count: number }) {
@@ -751,6 +769,7 @@ function TabRemainingBadge({ count }: { count: number }) {
 
 function getTasksForBlock(allTasks: DailyTask[], blockId: BlockId): DailyTask[] {
   if (blockId === ROUTINE_TAB) return allTasks.filter(isRoutineTask);
+  if (blockId === SPOT_TAB) return allTasks.filter(isSpotTask);
   return allTasks.filter((t) => t.goalId === blockId);
 }
 
@@ -763,12 +782,20 @@ function mergeBlockIntoAll(
     const others = allTasks.filter((t) => !isRoutineTask(t));
     return [...newVisible, ...others];
   }
+  if (blockId === SPOT_TAB) {
+    const others = allTasks.filter((t) => !isSpotTask(t));
+    return [...others, ...newVisible];
+  }
   const others = allTasks.filter((t) => t.goalId !== blockId);
   return [...others, ...newVisible];
 }
 
 function goalIdForBlock(blockId: BlockId): string | null {
   return blockId === ROUTINE_TAB ? null : blockId;
+}
+
+function isGoalBlock(blockId: BlockId): boolean {
+  return blockId !== ROUTINE_TAB && blockId !== SPOT_TAB;
 }
 
 /** 目標ブロックの並べ替え用シェル（ルーティンは対象外） */
@@ -1222,14 +1249,16 @@ export default function DailyTodoApp({
         const log = currentLogs.find((l) => l.date === selectedDate);
 
         if (log) {
-          const goalIds = (log.activeGoalIds ?? []).filter(
-            (id) => id !== OTHER_TAB && id !== ROUTINE_TAB
-          );
+          const goalIds = (log.activeGoalIds ?? []).filter((id) => !FIXED_BLOCK_IDS.has(id));
           let tasks = log.tasks;
           let changed = false;
 
           if (!tasks.some(isRoutineTask)) {
             tasks = [...tasks, emptyTask(null)];
+            changed = true;
+          }
+          if (!tasks.some(isSpotTask)) {
+            tasks = [...tasks, emptyTask(SPOT_TAB)];
             changed = true;
           }
           for (const gid of goalIds) {
@@ -1267,12 +1296,16 @@ export default function DailyTodoApp({
               : [emptyTask(null)];
 
           const goalPlaceholderTasks = carriedGoals.map((gid) => emptyTask(gid));
-          const initialTasks = [...routineList, ...goalPlaceholderTasks];
+          const initialTasks = [
+            ...routineList,
+            ...goalPlaceholderTasks,
+            emptyTask(SPOT_TAB),
+          ];
 
           await persistLog(selectedDate, initialTasks, carriedGoals);
           if (cancelled) return;
         } else {
-          setAllTasks([emptyTask(null)]);
+          setAllTasks([emptyTask(null), emptyTask(SPOT_TAB)]);
           setActiveGoalIds([]);
         }
 
@@ -1514,13 +1547,10 @@ export default function DailyTodoApp({
 
   const handleRemoveGoalBlock = (goalId: string) => {
     const nextGoals = activeGoalIds.filter((id) => id !== goalId);
-    const nextTasks = allTasks.filter((t) => t.goalId !== goalId);
-    const hasRoutineOrGoals = nextTasks.some((t) => !isOtherTask(t));
-    void persistLog(
-      selectedDate,
-      hasRoutineOrGoals ? nextTasks : [emptyTask(null)],
-      nextGoals
-    );
+    let nextTasks = allTasks.filter((t) => t.goalId !== goalId);
+    if (!nextTasks.some(isRoutineTask)) nextTasks = [...nextTasks, emptyTask(null)];
+    if (!nextTasks.some(isSpotTask)) nextTasks = [...nextTasks, emptyTask(SPOT_TAB)];
+    void persistLog(selectedDate, nextTasks, nextGoals);
   };
 
   const handleGoalBlockDragEnd = (event: DragEndEvent) => {
@@ -1885,7 +1915,7 @@ export default function DailyTodoApp({
                       <>
                         {blockTasks.length === 0 ? (
                           <p className="text-gray-400 text-sm py-6 text-center">
-                            この目標のTodoはまだありません。
+                            {blockEmptyMessage(blockId)}
                           </p>
                         ) : (
                           <DndContext
@@ -1965,11 +1995,8 @@ export default function DailyTodoApp({
                     const collapsed = collapsedBlocks.has(blockId);
                     const progress = countBlockProgress(blockTasks);
                     const remaining = countRemainingTasks(blockTasks);
-                    const title =
-                      blockId === ROUTINE_TAB
-                        ? 'ルーティン'
-                        : goalTitleMap.get(blockId) || '目標';
-                    const isGoal = blockId !== ROUTINE_TAB;
+                    const title = blockTitle(blockId, goalTitleMap);
+                    const showDrag = isGoalBlock(blockId);
 
                     return (
                       <div
@@ -1978,7 +2005,7 @@ export default function DailyTodoApp({
                           opts?.isDragging && 'bg-blue-50/80'
                         )}
                       >
-                        {isGoal && opts?.dragHandleProps && (
+                        {showDrag && opts?.dragHandleProps && (
                           <button
                             type="button"
                             {...opts.dragHandleProps}
@@ -2009,13 +2036,18 @@ export default function DailyTodoApp({
                           <span className="font-bold text-gray-800 truncate text-sm md:text-base">
                             {title}
                           </span>
+                          {blockId === SPOT_TAB && (
+                            <span className="hidden sm:inline text-[11px] font-normal text-gray-400 truncate">
+                              ロードマップ外・今日限り
+                            </span>
+                          )}
                         </button>
 
                         <span className="text-xs md:text-sm tabular-nums text-gray-500 font-medium flex-shrink-0">
                           {progress.done} / {progress.total}
                         </span>
 
-                        {isGoal && (
+                        {showDrag && (
                           <button
                             type="button"
                             onClick={() => handleRemoveGoalBlock(blockId)}
@@ -2029,6 +2061,7 @@ export default function DailyTodoApp({
                   };
 
                   const routineCollapsed = collapsedBlocks.has(ROUTINE_TAB);
+                  const spotCollapsed = collapsedBlocks.has(SPOT_TAB);
 
                   return (
                     <>
@@ -2084,6 +2117,18 @@ export default function DailyTodoApp({
                           </div>
                         </SortableContext>
                       </DndContext>
+
+                      <section
+                        className={clsx(
+                          'rounded-2xl border bg-white overflow-hidden transition-colors',
+                          'border-gray-200 border-l-4 border-l-amber-400'
+                        )}
+                      >
+                        {renderBlockHeader(SPOT_TAB)}
+                        {!spotCollapsed && (
+                          <div className="p-2 md:p-4">{renderBlockBody(SPOT_TAB)}</div>
+                        )}
+                      </section>
                     </>
                   );
                 })()}

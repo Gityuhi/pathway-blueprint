@@ -330,9 +330,11 @@ export default function ActivityHeatmap() {
                             {task.status}
                             {task.goalId == null
                               ? ' · ルーティン'
-                              : task.goalId === 'other'
-                                ? ' · Backlog'
-                                : ' · 目標'}
+                              : task.goalId === 'spot'
+                                ? ' · 例外'
+                                : task.goalId === 'other'
+                                  ? ' · Backlog'
+                                  : ' · 目標'}
                           </p>
                         </div>
                       </li>
