@@ -1078,6 +1078,7 @@ export default function DailyTodoApp({
   const [selectedDate, setSelectedDate] = useState<string>(getLocalDate());
   const [routineTasks, setRoutineTasks] = useState<RoutineTask[]>([]);
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied'>('idle');
+  const [copiedBlockId, setCopiedBlockId] = useState<BlockId | null>(null);
   const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
   const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
 
@@ -1363,10 +1364,28 @@ export default function DailyTodoApp({
     [allTasks, activeGoalIds, selectedDate, persistLog]
   );
 
-  const focusTaskInput = useCallback((taskId: string | undefined) => {
-    if (!taskId) return;
-    setTimeout(() => inputRefsById.current.get(taskId)?.focus(), 0);
-  }, []);
+  const focusTaskInput = useCallback(
+    (taskId: string | undefined, caret: 'start' | 'end' = 'start') => {
+      if (!taskId) return;
+      const apply = () => {
+        const el = inputRefsById.current.get(taskId);
+        if (!el) return false;
+        el.focus();
+        const pos = caret === 'end' ? el.value.length : 0;
+        try {
+          el.setSelectionRange(pos, pos);
+        } catch {
+          // ignore unsupported selection
+        }
+        return true;
+      };
+      // 削除後の再描画を待ってからフォーカス（必要なら1回リトライ）
+      requestAnimationFrame(() => {
+        if (!apply()) setTimeout(apply, 0);
+      });
+    },
+    []
+  );
 
   const toggleSelection = (id: string, shiftKey: boolean, index: number, blockTasks: DailyTask[]) => {
     const newSelected = new Set(selectedTaskIds);
@@ -1418,17 +1437,20 @@ export default function DailyTodoApp({
     } else if (e.key === 'Backspace') {
       if (blockTasks[index].text === '' && blockTasks.length > 1) {
         e.preventDefault();
-        const prevId = blockTasks[Math.max(0, index - 1)]?.id;
+        // 上の行へ。先頭行を消す場合は次の行が新しい先頭になる
+        const focusId =
+          index > 0 ? blockTasks[index - 1]?.id : blockTasks[index + 1]?.id;
         const newVisible = blockTasks.filter((_, i) => i !== index);
         updateBlockAndSave(blockId, syncParentStatuses(newVisible));
-        focusTaskInput(prevId);
+        // 続けて削除できるよう、フォーカス先の右端へ
+        focusTaskInput(focusId, 'end');
       }
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      if (index > 0) focusTaskInput(blockTasks[index - 1]?.id);
+      if (index > 0) focusTaskInput(blockTasks[index - 1]?.id, 'end');
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
-      if (index < blockTasks.length - 1) focusTaskInput(blockTasks[index + 1]?.id);
+      if (index < blockTasks.length - 1) focusTaskInput(blockTasks[index + 1]?.id, 'end');
     }
   };
 
@@ -1522,17 +1544,31 @@ export default function DailyTodoApp({
     [updateBlockAndSave]
   );
 
+  const tasksToCopyText = (tasks: DailyTask[]) =>
+    tasks.map((task) => `${'\t'.repeat(task.indentLevel)}${task.text}`).join('\n');
+
   const copyToClipboard = () => {
     const tasksToCopy =
       selectedTaskIds.size > 0
         ? focusTasks.filter((t) => selectedTaskIds.has(t.id))
         : focusTasks;
-    const text = tasksToCopy
-      .map((task) => `${'\t'.repeat(task.indentLevel)}${task.text}`)
-      .join('\n');
-    navigator.clipboard.writeText(text).then(() => {
+    navigator.clipboard.writeText(tasksToCopyText(tasksToCopy)).then(() => {
       setCopyStatus('copied');
+      setCopiedBlockId(null);
       setTimeout(() => setCopyStatus('idle'), 2000);
+    });
+  };
+
+  const copyBlockToClipboard = (blockId: BlockId) => {
+    const blockTasks = getTasksForBlock(allTasks, blockId);
+    const tasksToCopy =
+      selectedTaskIds.size > 0
+        ? blockTasks.filter((t) => selectedTaskIds.has(t.id))
+        : blockTasks;
+    navigator.clipboard.writeText(tasksToCopyText(tasksToCopy)).then(() => {
+      setCopiedBlockId(blockId);
+      setCopyStatus('idle');
+      setTimeout(() => setCopiedBlockId((cur) => (cur === blockId ? null : cur)), 2000);
     });
   };
 
@@ -2046,6 +2082,27 @@ export default function DailyTodoApp({
                         <span className="text-xs md:text-sm tabular-nums text-gray-500 font-medium flex-shrink-0">
                           {progress.done} / {progress.total}
                         </span>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            copyBlockToClipboard(blockId);
+                          }}
+                          className={clsx(
+                            'inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium transition-colors flex-shrink-0',
+                            copiedBlockId === blockId
+                              ? 'text-green-600 bg-green-50'
+                              : 'text-gray-400 hover:text-gray-700 hover:bg-gray-100'
+                          )}
+                          title="このブロックのTodoをコピー"
+                          aria-label="このブロックのTodoをコピー"
+                        >
+                          {copiedBlockId === blockId ? <Check size={14} /> : <Copy size={14} />}
+                          <span className="hidden md:inline">
+                            {copiedBlockId === blockId ? 'Copied' : 'Copy'}
+                          </span>
+                        </button>
 
                         {showDrag && (
                           <button
