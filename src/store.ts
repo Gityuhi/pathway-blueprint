@@ -22,6 +22,7 @@ const DAILY_STORAGE_KEY = 'pathway-daily-logs';
 const ROUTINE_STORAGE_KEY = 'pathway-routine-tasks';
 const ASSIGNED_ROADMAP_KEY = 'pathway-assigned-roadmap-id';
 const BACKLOG_STORAGE_KEY = 'pathway-backlog-tasks';
+const TODO_COLLAPSED_BLOCKS_KEY = 'pathway-todo-collapsed-blocks';
 
 /** セッション中のメモリキャッシュ（タブ切替の再取得を防ぐ） */
 let dailyLogsCache: DailyLog[] | null = null;
@@ -618,6 +619,23 @@ export const loadBacklogTasks = async (): Promise<BacklogTask[]> => {
   if (backlogTasksCache) return normalizeBacklogTasks(backlogTasksCache);
   const settings = await loadUserSettings();
   return normalizeBacklogTasks(settings.backlogTasks);
+};
+
+/** ToDo ブロックの折りたたみ状態（ブロック ID の一覧） */
+export const loadTodoCollapsedBlockIds = (): string[] => {
+  const data = localStorage.getItem(TODO_COLLAPSED_BLOCKS_KEY);
+  if (!data) return [];
+  try {
+    const parsed = JSON.parse(data) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === 'string' && id.length > 0);
+  } catch {
+    return [];
+  }
+};
+
+export const saveTodoCollapsedBlockIds = (ids: string[]): void => {
+  localStorage.setItem(TODO_COLLAPSED_BLOCKS_KEY, JSON.stringify([...new Set(ids)]));
 };
 
 export const saveBacklogTasks = async (tasks: BacklogTask[]): Promise<void> => {

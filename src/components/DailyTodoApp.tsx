@@ -46,6 +46,8 @@ import {
   calcDailyAchievementRate,
   migrateOtherTasksToBacklog,
   isRoutineActiveOnDate,
+  loadTodoCollapsedBlockIds,
+  saveTodoCollapsedBlockIds,
   type Roadmap,
 } from '../store';
 import type {
@@ -1084,7 +1086,9 @@ export default function DailyTodoApp({
 
   const [allTasks, setAllTasks] = useState<DailyTask[]>([]);
   const [activeGoalIds, setActiveGoalIds] = useState<string[]>([]);
-  const [collapsedBlocks, setCollapsedBlocks] = useState<Set<string>>(new Set());
+  const [collapsedBlocks, setCollapsedBlocks] = useState<Set<string>>(
+    () => new Set(loadTodoCollapsedBlockIds())
+  );
   const [goalPickerOpen, setGoalPickerOpen] = useState(false);
   const [pendingGoalIds, setPendingGoalIds] = useState<Set<string>>(new Set());
   const [journalDrawerOpen, setJournalDrawerOpen] = useState(false);
@@ -1577,6 +1581,7 @@ export default function DailyTodoApp({
       const next = new Set(prev);
       if (next.has(blockId)) next.delete(blockId);
       else next.add(blockId);
+      saveTodoCollapsedBlockIds([...next]);
       return next;
     });
   };
@@ -1587,6 +1592,13 @@ export default function DailyTodoApp({
     if (!nextTasks.some(isRoutineTask)) nextTasks = [...nextTasks, emptyTask(null)];
     if (!nextTasks.some(isSpotTask)) nextTasks = [...nextTasks, emptyTask(SPOT_TAB)];
     void persistLog(selectedDate, nextTasks, nextGoals);
+    setCollapsedBlocks((prev) => {
+      if (!prev.has(goalId)) return prev;
+      const next = new Set(prev);
+      next.delete(goalId);
+      saveTodoCollapsedBlockIds([...next]);
+      return next;
+    });
   };
 
   const handleGoalBlockDragEnd = (event: DragEndEvent) => {
@@ -1616,6 +1628,7 @@ export default function DailyTodoApp({
     setCollapsedBlocks((prev) => {
       const next = new Set(prev);
       toAdd.forEach((id) => next.delete(id));
+      saveTodoCollapsedBlockIds([...next]);
       return next;
     });
     setGoalPickerOpen(false);
