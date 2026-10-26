@@ -22,6 +22,7 @@ import {
   parseRoadmapImport,
 } from './store';
 import type { Roadmap } from './store';
+import { isNodeDone } from './types';
 
 interface UpcomingDeadlineNode {
   title: string;
@@ -102,7 +103,7 @@ function App() {
 
     if (assignedRoadmap) {
       assignedRoadmap.nodes.forEach((node) => {
-        if (!node.data.deadline) return;
+        if (!node.data.deadline || isNodeDone(node.data)) return;
 
         const [y, m, d] = node.data.deadline.split('-').map(Number);
         const deadlineDate = new Date(y, m - 1, d);

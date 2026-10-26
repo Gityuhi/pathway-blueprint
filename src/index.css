@@ -40,3 +40,77 @@ body {
 .animate-slide-in-left {
   animation: slide-in-left 0.2s ease-out;
 }
+
+/* ノード進捗スライダー。トラック塗りはつまみ中心に合わせる */
+.progress-slider {
+  --thumb: 28px;
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: var(--thumb);
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.progress-slider:focus {
+  outline: none;
+}
+
+.progress-slider::-webkit-slider-runnable-track {
+  height: 10px;
+  border-radius: 9999px;
+  background: linear-gradient(
+    to right,
+    var(--progress-fill, #3b82f6) 0,
+    var(--progress-fill, #3b82f6)
+      calc(var(--progress, 0) * (100% - var(--thumb)) / 100 + var(--thumb) / 2),
+    #f3f4f6 calc(var(--progress, 0) * (100% - var(--thumb)) / 100 + var(--thumb) / 2),
+    #f3f4f6 100%
+  );
+}
+
+.progress-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  box-sizing: border-box;
+  width: var(--thumb);
+  height: var(--thumb);
+  margin-top: -9px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 2px solid var(--progress-fill, #3b82f6);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.18);
+}
+
+.progress-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px rgb(59 130 246 / 0.28);
+}
+
+.progress-slider::-moz-range-track {
+  height: 10px;
+  border-radius: 9999px;
+  background: #f3f4f6;
+  border: none;
+}
+
+.progress-slider::-moz-range-progress {
+  height: 10px;
+  border-radius: 9999px;
+  background: var(--progress-fill, #3b82f6);
+}
+
+.progress-slider::-moz-range-thumb {
+  box-sizing: border-box;
+  width: var(--thumb);
+  height: var(--thumb);
+  border-radius: 9999px;
+  background: #fff;
+  border: 2px solid var(--progress-fill, #3b82f6);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.18);
+}
+
+.progress-slider:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 4px rgb(59 130 246 / 0.28);
+}

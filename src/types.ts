@@ -25,12 +25,33 @@ export interface NodeData {
   leftChildCount?: number;
   rightChildCount?: number;
   onToggleCollapse?: (nodeId: string, side: 'left' | 'right') => void;
+  /** UI only — フォーカス中だけコピー／ペーストを出す */
+  showCopyButton?: boolean;
+  /** UI only — コピー直後の表示 */
+  justCopied?: boolean;
+  /** UI only — ペーストできる内容がクリップボードにある */
+  canPaste?: boolean;
+  /** UI only — ペースト直後の表示 */
+  justPasted?: boolean;
+  onCopySubtree?: (nodeId: string) => void;
+  onPasteSubtree?: (nodeId: string) => void;
   /** UI only — ドラッグ中のドロップ候補 */
   isDropTarget?: boolean;
   /** UI only — ドラッグ中のノード */
   isDragging?: boolean;
   /** UI only — サブツリーが左向き */
   growsLeft?: boolean;
+}
+
+/** 進捗100%を完了とみなす。別フィールドは持たず、保存値から導出する */
+export function isNodeDone(data: Pick<NodeData, 'progress'>): boolean {
+  return (data.progress ?? 0) >= 100;
+}
+
+/** 1%以上かつ未完了。ノード色は変えず、表示用の status だけに使う */
+export function isNodeInProgress(data: Pick<NodeData, 'progress'>): boolean {
+  const progress = data.progress ?? 0;
+  return progress >= 1 && progress < 100;
 }
 
 // --- Today's ToDo Types ---

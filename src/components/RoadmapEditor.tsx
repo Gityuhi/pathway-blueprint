@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef, useSyncExternalStore } from 'react';
 import ReactFlow, {
   Background,
   Controls,
@@ -18,7 +18,7 @@ import 'reactflow/dist/style.css';
 
 import CustomNode from './CustomNode';
 import TodoModal from './TodoModal';
-import type { NodeData } from '../types';
+import { isNodeDone, isNodeInProgress, type NodeData } from '../types';
 import type { Roadmap } from '../store';
 
 interface RoadmapEditorProps {
@@ -37,14 +37,44 @@ const NODE_Y_GAP = 48;
 /** ルート直下の子のみ、この個数ごとに左右へ折り返す */
 const ROOT_CHILD_WRAP = 7;
 const CLICK_DELAY_MS = 250;
-/** モバイル等で交差が取れないときの近接ドロップ判定半径 (px) */
-const DROP_PROXIMITY_PX = 140;
+const COPIED_LABEL_MS = 1600;
+
+type ClipboardNode = {
+  data: NodeData;
+  children: ClipboardNode[];
+};
+
+/** ロードマップを切り替えても残す。複製ではなくペースト用 */
+let subtreeClipboard: ClipboardNode | null = null;
+const clipboardListeners = new Set<() => void>();
+
+function subscribeSubtreeClipboard(listener: () => void) {
+  clipboardListeners.add(listener);
+  return () => {
+    clipboardListeners.delete(listener);
+  };
+}
+
+function hasSubtreeClipboard() {
+  return subtreeClipboard !== null;
+}
+
+function setSubtreeClipboard(next: ClipboardNode | null) {
+  subtreeClipboard = next;
+  clipboardListeners.forEach((listener) => listener());
+}
 
 function buildChildrenMap(nodes: Node[], edges: Edge[]) {
   const childrenMap = new Map<string, string[]>();
   nodes.forEach((n) => childrenMap.set(n.id, []));
+  const seenTargets = new Set<string>();
   edges.forEach((e) => {
-    childrenMap.get(e.source)?.push(e.target);
+    if (!e.source || !e.target || e.source === e.target) return;
+    if (seenTargets.has(e.target)) return;
+    const siblings = childrenMap.get(e.source);
+    if (!siblings || !childrenMap.has(e.target)) return;
+    seenTargets.add(e.target);
+    siblings.push(e.target);
   });
   return childrenMap;
 }
@@ -52,21 +82,11 @@ function buildChildrenMap(nodes: Node[], edges: Edge[]) {
 function getHiddenNodeIds(nodes: Node<NodeData>[], edges: Edge[]) {
   const childrenMap = buildChildrenMap(nodes, edges);
   const hidden = new Set<string>();
-
-  let rootId = 'root';
-  if (!nodes.find((n) => n.id === 'root')) {
-    const nodeIds = new Set(nodes.map((n) => n.id));
-    const targetIds = new Set(edges.map((e) => e.target));
-    for (const id of nodeIds) {
-      if (!targetIds.has(id)) {
-        rootId = id;
-        break;
-      }
-    }
-  }
+  const rootId = resolveRootId(nodes, edges);
 
   const hideDescendants = (nodeId: string) => {
     for (const childId of childrenMap.get(nodeId) || []) {
+      if (hidden.has(childId)) continue;
       hidden.add(childId);
       hideDescendants(childId);
     }
@@ -93,14 +113,50 @@ function getHiddenNodeIds(nodes: Node<NodeData>[], edges: Edge[]) {
   return hidden;
 }
 
+/** 自己ループと二重の親を捨て、子ごとの最初のエッジだけ残す */
+function normalizeEdges(edges: Edge[]): Edge[] {
+  const seenTargets = new Set<string>();
+  const result: Edge[] = [];
+  for (const edge of edges) {
+    if (!edge.source || !edge.target || edge.source === edge.target) continue;
+    if (seenTargets.has(edge.target)) continue;
+    seenTargets.add(edge.target);
+    result.push(edge);
+  }
+  return result;
+}
+
+function resolveRootId(nodes: { id: string }[], edges: Edge[]): string {
+  if (nodes.some((n) => n.id === 'root')) return 'root';
+  const targets = new Set(edges.map((e) => e.target));
+  return nodes.find((n) => !targets.has(n.id))?.id ?? nodes[0]?.id ?? 'root';
+}
+
+function isTreeRoot(nodeId: string, nodes: { id: string }[], edges: Edge[]): boolean {
+  return nodeId === resolveRootId(nodes, edges);
+}
+
 function getDirectChildren(nodeId: string, edges: Edge[]) {
-  return edges.filter((e) => e.source === nodeId).map((e) => e.target);
+  const seen = new Set<string>();
+  const children: string[] = [];
+  for (const edge of edges) {
+    if (edge.source !== nodeId || edge.target === nodeId) continue;
+    if (seen.has(edge.target)) continue;
+    const firstParent = edges.find(
+      (candidate) => candidate.target === edge.target && candidate.source !== candidate.target
+    )?.source;
+    if (firstParent !== nodeId) continue;
+    seen.add(edge.target);
+    children.push(edge.target);
+  }
+  return children;
 }
 
 function findDescendantIds(nodeId: string, edges: Edge[]): Set<string> {
   const ids = new Set<string>();
   const walk = (id: string) => {
     for (const childId of getDirectChildren(id, edges)) {
+      if (ids.has(childId)) continue;
       ids.add(childId);
       walk(childId);
     }
@@ -109,21 +165,110 @@ function findDescendantIds(nodeId: string, edges: Edge[]): Set<string> {
   return ids;
 }
 
+function centerYOf(node: Node | undefined): number {
+  if (!node) return 0;
+  const height =
+    typeof node.height === 'number' && node.height > 0
+      ? node.height
+      : estimateNodeHeight(node as Node<NodeData>);
+  return node.position.y + height / 2;
+}
+
+/** ドラッグしたノードを、同じ列の中だけで Y 順に差し込む */
+function reorderIdsByCenterY(
+  ids: string[],
+  draggedId: string,
+  yOf: (id: string) => number
+): string[] {
+  if (!ids.includes(draggedId)) return ids;
+  const draggedY = yOf(draggedId);
+  const rest = ids.filter((id) => id !== draggedId);
+  let insertAt = rest.length;
+  for (let i = 0; i < rest.length; i += 1) {
+    if (yOf(rest[i]) > draggedY) {
+      insertAt = i;
+      break;
+    }
+  }
+  const next = [...rest];
+  next.splice(insertAt, 0, draggedId);
+  return next;
+}
+
+function reorderSiblings(
+  parentId: string,
+  draggedId: string,
+  nodes: Node[],
+  edges: Edge[]
+): string[] {
+  const childIds = getDirectChildren(parentId, edges);
+  const yOf = (id: string) => centerYOf(nodes.find((node) => node.id === id));
+  if (!isTreeRoot(parentId, nodes, edges)) {
+    return reorderIdsByCenterY(childIds, draggedId, yOf);
+  }
+
+  const chunks: string[][] = [];
+  for (let i = 0; i < childIds.length; i += ROOT_CHILD_WRAP) {
+    chunks.push(childIds.slice(i, i + ROOT_CHILD_WRAP));
+  }
+  const chunkIndex = chunks.findIndex((chunk) => chunk.includes(draggedId));
+  if (chunkIndex < 0) return childIds;
+  chunks[chunkIndex] = reorderIdsByCenterY(chunks[chunkIndex], draggedId, yOf);
+  return chunks.flat();
+}
+
+/** 縦に並ぶ同じ列の兄弟。並べ替え中にここへ落とすと親が変わってしまう */
+function sameColumnSiblingIds(draggedId: string, nodes: Node[], edges: Edge[]): Set<string> {
+  const parentId = edges.find(
+    (edge) => edge.target === draggedId && edge.source !== edge.target
+  )?.source;
+  if (!parentId) return new Set();
+  const childIds = getDirectChildren(parentId, edges);
+  if (isTreeRoot(parentId, nodes, edges)) {
+    const index = childIds.indexOf(draggedId);
+    if (index < 0) return new Set();
+    const start = Math.floor(index / ROOT_CHILD_WRAP) * ROOT_CHILD_WRAP;
+    return new Set(
+      childIds.slice(start, start + ROOT_CHILD_WRAP).filter((id) => id !== draggedId)
+    );
+  }
+  return new Set(childIds.filter((id) => id !== draggedId));
+}
+
+function edgesWithChildOrder(edges: Edge[], parentId: string, childIds: string[]): Edge[] {
+  const childSet = new Set(childIds);
+  const kept = edges.filter((edge) => !childSet.has(edge.target));
+  const ordered = childIds.map(
+    (id) =>
+      edges.find((edge) => edge.source === parentId && edge.target === id) ??
+      makeParentEdge(parentId, id)
+  );
+  return normalizeEdges([...kept, ...ordered]);
+}
+
 /** 実測値があれば優先。なければタイトル行数などから推定 */
 function estimateNodeHeight(node: Node<NodeData>): number {
   if (typeof node.height === 'number' && node.height > 0) {
     return node.height;
   }
   const title = node.data.title || '無題のノード';
+  const done = isNodeDone(node.data);
+  const inProgress = isNodeInProgress(node.data);
+  const showDeadline = Boolean(node.data.deadline) && !done;
   const charCount = [...title].length;
-  // 幅280・padding込みでおおよそ13全角/行、最大2行
-  const lines = Math.min(2, Math.max(1, Math.ceil(charCount / 13)));
+  // status があるときは右列の分だけタイトル幅が狭くなる
+  const charsPerLine = inProgress || done ? 10 : 13;
+  const lines = Math.min(2, Math.max(1, Math.ceil(charCount / charsPerLine)));
   const titleH = lines * 22;
-  const deadlineH = node.data.deadline ? 16 : 0;
+  const deadlineLineH = showDeadline ? 16 : 0;
+  const leftH = titleH + deadlineLineH;
+  const statusH = inProgress || done ? 22 : 0;
+  const daysH = showDeadline ? 32 : 0;
+  const rightH = statusH + (statusH > 0 && daysH > 0 ? 4 : 0) + daysH;
   const progressH = 36;
   const paddingY = 24;
   const gap = 8;
-  return paddingY + titleH + deadlineH + gap + progressH;
+  return paddingY + Math.max(leftH, rightH) + gap + progressH;
 }
 
 function nodeCenter(node: Node) {
@@ -138,46 +283,43 @@ function nodeCenter(node: Node) {
   };
 }
 
-/** ドラッグ中ノードと交差／近接する、リペアレント可能なドロップ先を返す */
-function pickDropTarget(
-  draggedNode: Node,
-  intersecting: Node[],
-  edges: Edge[],
-  allNodes: Node[] = []
-): Node | null {
+function nodeArea(node: Node): number {
+  const width = node.width && node.width > 0 ? node.width : NODE_WIDTH;
+  const height =
+    node.height && node.height > 0
+      ? node.height
+      : estimateNodeHeight(node as Node<NodeData>);
+  return width * height;
+}
+
+/**
+ * ドラッグ中ノードの中心が乗っているノードだけを付け替え先にする。
+ * 同じ列の兄弟は並べ替え対象なので除外する。近接だけでは選ばない。
+ */
+function pickDropTarget(draggedNode: Node, edges: Edge[], allNodes: Node[]): Node | null {
   const descendants = findDescendantIds(draggedNode.id, edges);
-  const isValid = (n: Node) =>
-    n.id !== draggedNode.id && !n.hidden && !descendants.has(n.id);
+  const blocked = sameColumnSiblingIds(draggedNode.id, allNodes, edges);
+  const center = nodeCenter(draggedNode);
 
-  let candidates = intersecting.filter(isValid);
-
-  // タッチ操作では交差が取れないことがあるため、中心距離でも候補を拾う
-  if (candidates.length === 0 && allNodes.length > 0) {
-    const dragCenter = nodeCenter(draggedNode);
-    const prox2 = DROP_PROXIMITY_PX * DROP_PROXIMITY_PX;
-    candidates = allNodes.filter((n) => {
-      if (!isValid(n)) return false;
-      const c = nodeCenter(n);
-      const d2 = (c.x - dragCenter.x) ** 2 + (c.y - dragCenter.y) ** 2;
-      return d2 <= prox2;
-    });
-  }
+  const candidates = allNodes.filter((node) => {
+    if (node.id === draggedNode.id || node.hidden) return false;
+    if (descendants.has(node.id) || blocked.has(node.id)) return false;
+    const width = node.width && node.width > 0 ? node.width : NODE_WIDTH;
+    const height =
+      node.height && node.height > 0
+        ? node.height
+        : estimateNodeHeight(node as Node<NodeData>);
+    return (
+      center.x >= node.position.x &&
+      center.x <= node.position.x + width &&
+      center.y >= node.position.y &&
+      center.y <= node.position.y + height
+    );
+  });
 
   if (candidates.length === 0) return null;
-
-  const dragCenter = nodeCenter(draggedNode);
-  let best: Node | null = null;
-  let bestDist = Infinity;
-  for (const candidate of candidates) {
-    const c = nodeCenter(candidate);
-    const dist =
-      (c.x - dragCenter.x) ** 2 + (c.y - dragCenter.y) ** 2;
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = candidate;
-    }
-  }
-  return best;
+  candidates.sort((a, b) => nodeArea(a) - nodeArea(b));
+  return candidates[0];
 }
 
 function makeParentEdge(parentId: string, childId: string): Edge {
@@ -238,19 +380,9 @@ function getLayoutedElements(currentNodes: Node<NodeData>[], currentEdges: Edge[
     return node ? estimateNodeHeight(node) : 88;
   };
 
-  let rootId = 'root';
-  if (!currentNodes.find((n) => n.id === 'root')) {
-    const nodeIds = new Set(currentNodes.map((n) => n.id));
-    const targetIds = new Set(currentEdges.map((e) => e.target));
-    for (const id of nodeIds) {
-      if (!targetIds.has(id)) {
-        rootId = id;
-        break;
-      }
-    }
-  }
-
+  const rootId = resolveRootId(currentNodes, currentEdges);
   const subtreeHeights = new Map<string, number>();
+  const visiting = new Set<string>();
 
   const columnHeight = (childIds: string[]) => {
     let total = 0;
@@ -262,6 +394,10 @@ function getLayoutedElements(currentNodes: Node<NodeData>[], currentEdges: Edge[
   };
 
   const calculateHeight = (nodeId: string, dir: 1 | -1 = 1): number => {
+    const cached = subtreeHeights.get(nodeId);
+    if (cached !== undefined) return cached;
+    if (visiting.has(nodeId)) return heightOf(nodeId);
+    visiting.add(nodeId);
     const node = currentNodes.find((n) => n.id === nodeId);
     const allChildren = childrenMap.get(nodeId) || [];
     const selfH = heightOf(nodeId);
@@ -308,6 +444,7 @@ function getLayoutedElements(currentNodes: Node<NodeData>[], currentEdges: Edge[
   calculateHeight(rootId, 1);
 
   const newPositions = new Map<string, { x: number; y: number }>();
+  const placed = new Set<string>();
 
   /**
    * @param dir 子孫を伸ばす方向（1=右, -1=左）
@@ -318,6 +455,8 @@ function getLayoutedElements(currentNodes: Node<NodeData>[], currentEdges: Edge[
     centerY: number,
     dir: 1 | -1 = 1
   ) => {
+    if (placed.has(nodeId)) return;
+    placed.add(nodeId);
     const node = currentNodes.find((n) => n.id === nodeId);
     const allChildren = childrenMap.get(nodeId) || [];
     const selfH = heightOf(nodeId);
@@ -396,6 +535,88 @@ function stripUiMeta(data: NodeData): NodeData {
   return rest;
 }
 
+/** コピー対象は構造・タイトル・メモだけ。進捗・期限・ステータス（進捗由来）は持たない */
+function copyableNodeData(data: NodeData): NodeData {
+  const next: NodeData = {
+    title: data.title,
+    todos: [],
+    progress: 0,
+  };
+  if (data.memo?.trim()) next.memo = data.memo;
+  return next;
+}
+
+function withoutCollapse(data: NodeData): NodeData {
+  const next = { ...data };
+  delete next.collapsed;
+  delete next.collapsedLeft;
+  delete next.collapsedRight;
+  return next;
+}
+
+function captureSubtree(
+  nodeId: string,
+  nodes: Node<NodeData>[],
+  edges: Edge[],
+  seen = new Set<string>()
+): ClipboardNode | null {
+  if (seen.has(nodeId)) return null;
+  seen.add(nodeId);
+  const node = nodes.find((item) => item.id === nodeId);
+  if (!node) return null;
+  const children = getDirectChildren(nodeId, edges).flatMap((childId) => {
+    const child = captureSubtree(childId, nodes, edges, seen);
+    return child ? [child] : [];
+  });
+  return { data: copyableNodeData(node.data), children };
+}
+
+function materializeChildren(
+  parentId: string,
+  children: ClipboardNode[],
+  createdNodes: Node<NodeData>[],
+  createdEdges: Edge[]
+) {
+  children.forEach((child) => {
+    const id = crypto.randomUUID();
+    const data = copyableNodeData(child.data);
+    const created: Node<NodeData> = {
+      id,
+      type: 'custom',
+      position: { x: 0, y: 0 },
+      data,
+      width: NODE_WIDTH,
+      height: estimateNodeHeight({
+        id,
+        position: { x: 0, y: 0 },
+        data,
+      }),
+    };
+    createdNodes.push(created);
+    createdEdges.push(makeParentEdge(parentId, id));
+    materializeChildren(id, child.children, createdNodes, createdEdges);
+  });
+}
+
+function sideForNewChild(
+  parentId: string,
+  childIndex: number,
+  nodes: Node[],
+  edges: Edge[]
+): CollapseSide {
+  if (isTreeRoot(parentId, nodes, edges)) return rootChildSide(childIndex);
+  const parentNode = nodes.find((node) => node.id === parentId);
+  const parentOfParentId = edges.find((edge) => edge.target === parentId)?.source;
+  const parentOfParent = parentOfParentId
+    ? nodes.find((node) => node.id === parentOfParentId)
+    : undefined;
+  const growsLeft =
+    !!parentNode &&
+    !!parentOfParent &&
+    parentNode.position.x < parentOfParent.position.x;
+  return growsLeft ? 'left' : 'right';
+}
+
 function Flow({ roadmap, onSave }: RoadmapEditorProps) {
   const isLoaded = useRef(false);
   const [nodes, setNodes, onNodesChange] = useNodesState<NodeData>([]);
@@ -406,10 +627,19 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
+  const [copiedNodeId, setCopiedNodeId] = useState<string | null>(null);
+  const [pastedNodeId, setPastedNodeId] = useState<string | null>(null);
+  const canPaste = useSyncExternalStore(
+    subscribeSubtreeClipboard,
+    hasSubtreeClipboard,
+    () => false
+  );
 
   const clickTimeoutRef = useRef<number | null>(null);
   const measuredLayoutDoneRef = useRef(false);
-  const { fitView, getIntersectingNodes, getNodes } = useReactFlow();
+  const { fitView, getNodes } = useReactFlow();
+  const copiedTimerRef = useRef<number | null>(null);
+  const pastedTimerRef = useRef<number | null>(null);
 
   // Load data
   useEffect(() => {
@@ -470,8 +700,23 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
   };
 
   const onConnect = useCallback(
-    (params: Connection) => setEdges((eds) => addEdge(params, eds)),
-    [setEdges]
+    (params: Connection) => {
+      if (!params.source || !params.target || params.source === params.target) return;
+      if (edges.some((edge) => edge.target === params.target)) return;
+      if (findDescendantIds(params.target, edges).has(params.source)) return;
+      setEdges((eds) =>
+        addEdge(
+          {
+            ...params,
+            id: `e-${params.source}-${params.target}`,
+            animated: true,
+            style: { stroke: '#b1b1b7', strokeWidth: 2 },
+          },
+          eds
+        )
+      );
+    },
+    [edges, setEdges]
   );
 
   const handleToggleCollapse = useCallback(
@@ -564,16 +809,10 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
         setDropTargetId(null);
         return;
       }
-      const intersecting = getIntersectingNodes(draggedNode);
-      const target = pickDropTarget(
-        draggedNode,
-        intersecting,
-        edges,
-        getNodes()
-      );
+      const target = pickDropTarget(draggedNode, edges, getNodes());
       setDropTargetId(target?.id ?? null);
     },
-    [edges, getIntersectingNodes, getNodes]
+    [edges, getNodes]
   );
 
   // ドラッグ終了: 他ノードへドロップなら親変更、否则は同親の兄弟並べ替え
@@ -587,33 +826,33 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
 
       let resolvedDropId: string | null = null;
       if (draggedNode.id !== 'root') {
-        const intersecting = getIntersectingNodes(draggedNode);
-        resolvedDropId =
-          pickDropTarget(draggedNode, intersecting, edges, getNodes())?.id ??
-          null;
+        resolvedDropId = pickDropTarget(draggedNode, edges, getNodes())?.id ?? null;
       }
       setDropTargetId(null);
       setDraggingNodeId(null);
 
-      const currentParentId = edges.find((e) => e.target === draggedNode.id)
-        ?.source;
+      const currentParentId = edges.find((e) => e.target === draggedNode.id)?.source;
 
-      // 別ノードへドロップ → サブツリーごとリペアレント
+      // 別ノードの上で離したときだけ、サブツリーごと付け替える
       if (resolvedDropId && resolvedDropId !== currentParentId) {
-        const withoutOldParent = edges.filter(
-          (e) => e.target !== draggedNode.id
-        );
-        const nextEdges = [
+        const withoutOldParent = edges.filter((e) => e.target !== draggedNode.id);
+        const nextEdges = normalizeEdges([
           ...withoutOldParent,
           makeParentEdge(resolvedDropId, draggedNode.id),
-        ];
+        ]);
 
+        const childIndex = getDirectChildren(resolvedDropId, withoutOldParent).length;
+        const side = sideForNewChild(
+          resolvedDropId,
+          childIndex,
+          nodesWithDrag,
+          withoutOldParent
+        );
         const nextNodes = nodesWithDrag.map((n) => {
           if (n.id !== resolvedDropId) return n;
-          // ドロップ先の両側を開いて見えるようにする
           return {
             ...n,
-            data: expandSide(expandSide(n.data, 'left'), 'right'),
+            data: expandSide(n.data, side),
           };
         });
 
@@ -624,21 +863,16 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
         return;
       }
 
-      // 同じ親内（またはドロップなし）→ 兄弟を Y 順に並べ替え
+      // 同じ列の中だけで並べ替える。左右の列は混ぜない
       let nextEdges = edges;
       if (currentParentId) {
-        const siblingEdges = edges.filter((e) => e.source === currentParentId);
-        const otherEdges = edges.filter((e) => e.source !== currentParentId);
-
-        const sortedSiblingEdges = [...siblingEdges].sort((a, b) => {
-          const yA =
-            nodesWithDrag.find((n) => n.id === a.target)?.position.y ?? 0;
-          const yB =
-            nodesWithDrag.find((n) => n.id === b.target)?.position.y ?? 0;
-          return yA - yB;
-        });
-
-        nextEdges = [...otherEdges, ...sortedSiblingEdges];
+        const orderedChildIds = reorderSiblings(
+          currentParentId,
+          draggedNode.id,
+          nodesWithDrag,
+          edges
+        );
+        nextEdges = edgesWithChildOrder(edges, currentParentId, orderedChildIds);
       }
 
       const layoutedNodes = getLayoutedElements(nodesWithDrag, nextEdges);
@@ -648,7 +882,7 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
       }
       setFocusedNodeId(draggedNode.id);
     },
-    [nodes, edges, setNodes, setEdges, getIntersectingNodes, getNodes]
+    [nodes, edges, setNodes, setEdges, getNodes]
   );
 
   const handleUpdateNode = useCallback(
@@ -829,8 +1063,71 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
   }, [addChildNode, selectNextNode, handleDelete, modalOpen]);
 
   useEffect(() => {
-    return () => clearClickTimeout();
+    return () => {
+      clearClickTimeout();
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+      if (pastedTimerRef.current !== null) window.clearTimeout(pastedTimerRef.current);
+    };
   }, []);
+
+  const flashNodeLabel = (
+    nodeId: string,
+    setId: (value: string | null | ((current: string | null) => string | null)) => void,
+    timerRef: { current: number | null }
+  ) => {
+    setId(nodeId);
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => {
+      setId((current) => (current === nodeId ? null : current));
+      timerRef.current = null;
+    }, COPIED_LABEL_MS);
+  };
+
+  const handleCopySubtree = useCallback(
+    (nodeId: string) => {
+      const snapshot = captureSubtree(nodeId, nodes, edges);
+      if (!snapshot) return;
+      setSubtreeClipboard(snapshot);
+      flashNodeLabel(nodeId, setCopiedNodeId, copiedTimerRef);
+    },
+    [nodes, edges]
+  );
+
+  const handlePasteSubtree = useCallback(
+    (nodeId: string) => {
+      const snapshot = subtreeClipboard;
+      const target = nodes.find((node) => node.id === nodeId);
+      if (!snapshot || !target) return;
+
+      const removeIds = findDescendantIds(nodeId, edges);
+      const createdNodes: Node<NodeData>[] = [];
+      const createdEdges: Edge[] = [];
+      materializeChildren(nodeId, snapshot.children, createdNodes, createdEdges);
+
+      const nextNodes = [
+        ...nodes
+          .filter((node) => !removeIds.has(node.id))
+          .map((node) =>
+            node.id === nodeId
+              ? { ...node, data: withoutCollapse(copyableNodeData(snapshot.data)) }
+              : node
+          ),
+        ...createdNodes,
+      ];
+      const nextEdges = normalizeEdges([
+        ...edges.filter(
+          (edge) => !removeIds.has(edge.source) && !removeIds.has(edge.target)
+        ),
+        ...createdEdges,
+      ]);
+
+      setNodes(getLayoutedElements(nextNodes, nextEdges));
+      setEdges(nextEdges);
+      setFocusedNodeId(nodeId);
+      flashNodeLabel(nodeId, setPastedNodeId, pastedTimerRef);
+    },
+    [nodes, edges, setNodes, setEdges]
+  );
 
   const childrenMap = useMemo(
     () => buildChildrenMap(nodes, edges),
@@ -875,7 +1172,8 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
           selected: n.id === focusedNodeId || !!n.selected,
           style: {
             ...n.style,
-            zIndex: isDragging ? 1000 : n.style?.zIndex,
+            overflow: 'visible',
+            zIndex: isDragging ? 1000 : n.id === focusedNodeId ? 20 : 1,
           },
           data: {
             ...n.data,
@@ -886,6 +1184,12 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
             leftChildCount: leftChildIds.length,
             rightChildCount: rightChildIds.length,
             onToggleCollapse: handleToggleCollapse,
+            showCopyButton: n.id === focusedNodeId && !isDragging,
+            justCopied: n.id === copiedNodeId,
+            justPasted: n.id === pastedNodeId,
+            canPaste,
+            onCopySubtree: handleCopySubtree,
+            onPasteSubtree: handlePasteSubtree,
             isDropTarget: n.id === dropTargetId,
             isDragging,
             growsLeft,
@@ -899,6 +1203,11 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
       hiddenNodeIds,
       focusedNodeId,
       handleToggleCollapse,
+      handleCopySubtree,
+      handlePasteSubtree,
+      copiedNodeId,
+      pastedNodeId,
+      canPaste,
       dropTargetId,
       draggingNodeId,
     ]
@@ -959,7 +1268,8 @@ function Flow({ roadmap, onSave }: RoadmapEditorProps) {
             <p>Enter: 子ノード作成</p>
             <p>Backspace: 削除</p>
             <p>Tab: 切り替え</p>
-            <p>Drag: 並べ替え / 他ノードへドロップで親変更</p>
+            <p>Drag: 同じ列で並べ替え / 別ノードの上で離すと親変更</p>
+            <p>コピー: タイトル・メモ・構造を保存 / ペースト: フォーカス中のノードを上書き</p>
             <p>±ボタン: 左右それぞれの子を表示/非表示</p>
           </div>
         </Panel>

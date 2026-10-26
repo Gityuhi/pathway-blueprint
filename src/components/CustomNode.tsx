@@ -2,7 +2,7 @@ import { memo, useState } from 'react';
 import { Handle, Position } from 'reactflow';
 import type { NodeProps } from 'reactflow';
 import { MessageSquareText, Minus, Plus } from 'lucide-react';
-import type { NodeData } from '../types';
+import { isNodeDone, isNodeInProgress, type NodeData } from '../types';
 import clsx from 'clsx';
 
 const MEMO_PREVIEW_MAX = 200;
@@ -25,13 +25,17 @@ function truncateMemo(memo: string): string {
 }
 
 const CustomNode = ({ id, data, selected }: NodeProps<NodeData>) => {
-  const remainingDays = data.deadline ? getRemainingDays(data.deadline) : null;
+  const done = isNodeDone(data);
+  const inProgress = isNodeInProgress(data);
+  const showDeadline = Boolean(data.deadline) && !done;
+  const remainingDays = showDeadline && data.deadline ? getRemainingDays(data.deadline) : null;
   const hasMemo = Boolean(data.memo?.trim());
   const [showMemoTip, setShowMemoTip] = useState(false);
+  const progress = Math.min(100, Math.max(0, data.progress || 0));
 
   let deadlineClass = '';
   let daysClass = 'text-gray-600';
-  if (remainingDays !== null) {
+  if (!done && remainingDays !== null) {
     if (remainingDays <= 30) {
       deadlineClass = 'bg-red-100 border-red-400';
       daysClass = 'text-red-600';
@@ -50,16 +54,63 @@ const CustomNode = ({ id, data, selected }: NodeProps<NodeData>) => {
           ? 'bg-emerald-50 border-emerald-500 ring-2 ring-emerald-300 scale-[1.02]'
           : data.isDragging
             ? 'bg-blue-50 border-blue-500 ring-2 ring-blue-400 shadow-2xl scale-[1.03] opacity-95'
-            : [
-                deadlineClass || 'bg-white border-gray-100',
-                selected
-                  ? deadlineClass
-                    ? 'ring-2 ring-blue-200'
-                    : 'border-blue-500 ring-2 ring-blue-200'
-                  : '',
-              ]
+            : done
+              ? [
+                  'bg-emerald-50 border-emerald-300',
+                  selected ? 'ring-2 ring-blue-200' : '',
+                ]
+              : [
+                  deadlineClass || 'bg-white border-gray-100',
+                  selected
+                    ? deadlineClass
+                      ? 'ring-2 ring-blue-200'
+                      : 'border-blue-500 ring-2 ring-blue-200'
+                    : '',
+                ]
       )}
     >
+      {data.showCopyButton && (
+        <div className="absolute left-1/2 -translate-x-1/2 -top-2 -translate-y-full z-20 flex gap-1 nodrag nopan">
+          <button
+            type="button"
+            className={clsx(
+              'whitespace-nowrap px-2.5 py-1 rounded-full text-xs font-semibold shadow-md border',
+              data.justCopied
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                : 'bg-white text-gray-700 border-gray-200 hover:border-blue-400 hover:text-blue-600'
+            )}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              data.onCopySubtree?.(id);
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
+          >
+            {data.justCopied ? 'copied!' : 'コピー'}
+          </button>
+          <button
+            type="button"
+            disabled={!data.canPaste}
+            className={clsx(
+              'whitespace-nowrap px-2.5 py-1 rounded-full text-xs font-semibold shadow-md border',
+              data.justPasted
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                : data.canPaste
+                  ? 'bg-white text-gray-700 border-gray-200 hover:border-blue-400 hover:text-blue-600'
+                  : 'bg-gray-50 text-gray-300 border-gray-100 cursor-not-allowed'
+            )}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!data.canPaste) return;
+              data.onPasteSubtree?.(id);
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
+          >
+            {data.justPasted ? 'pasted!' : 'ペースト'}
+          </button>
+        </div>
+      )}
       <Handle
         type="target"
         position={Position.Left}
@@ -113,24 +164,50 @@ const CustomNode = ({ id, data, selected }: NodeProps<NodeData>) => {
               >
                 {data.title || '無題のノード'}
               </div>
-              {data.deadline && (
+              {showDeadline && data.deadline && (
                 <div className="mt-0.5 text-[11px] text-gray-400 tabular-nums">
                   期限 {data.deadline.replace(/-/g, '/')}
                 </div>
               )}
             </div>
           </div>
-          {remainingDays !== null && (
-            <div
-              className={clsx(
-                'flex-shrink-0 min-w-[2rem] px-1.5 py-0.5 text-center',
-                'text-lg font-bold tabular-nums leading-tight',
-                'border border-red-500 rounded',
-                daysClass
+          {(done || inProgress || remainingDays !== null) && (
+            <div className="flex flex-col items-end gap-1 shrink-0">
+              {done && (
+                <div
+                  className={clsx(
+                    'px-1.5 py-0.5 text-center whitespace-nowrap',
+                    'text-xs font-bold leading-tight tracking-wide',
+                    'text-emerald-700 bg-emerald-100 border border-emerald-400 rounded'
+                  )}
+                >
+                  done!
+                </div>
               )}
-              title={`残り${remainingDays}日`}
-            >
-              {remainingDays}
+              {inProgress && (
+                <div
+                  className={clsx(
+                    'px-1.5 py-0.5 text-center whitespace-nowrap',
+                    'text-[10px] font-bold leading-tight tracking-wide',
+                    'text-purple-700 bg-purple-100 border border-purple-300 rounded'
+                  )}
+                >
+                  in progress
+                </div>
+              )}
+              {remainingDays !== null && (
+                <div
+                  className={clsx(
+                    'min-w-[2rem] px-1.5 py-0.5 text-center',
+                    'text-lg font-bold tabular-nums leading-tight',
+                    'border border-red-500 rounded',
+                    daysClass
+                  )}
+                  title={`残り${remainingDays}日`}
+                >
+                  {remainingDays}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -138,15 +215,15 @@ const CustomNode = ({ id, data, selected }: NodeProps<NodeData>) => {
         <div className="w-full">
           <div className="flex justify-between text-xs text-gray-500 mb-1">
             <span>Progress</span>
-            <span>{Math.round(data.progress || 0)}%</span>
+            <span>{Math.round(progress)}%</span>
           </div>
           <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
             <div
               className={clsx(
                 'h-full rounded-full transition-all duration-500 ease-out',
-                data.progress === 100 ? 'bg-green-500' : 'bg-blue-500'
+                progress >= 100 ? 'bg-green-500' : 'bg-blue-500'
               )}
-              style={{ width: `${data.progress || 0}%` }}
+              style={{ width: `${progress}%` }}
             />
           </div>
         </div>
